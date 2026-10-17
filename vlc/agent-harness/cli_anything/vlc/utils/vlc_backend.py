@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -29,8 +30,16 @@ def find_vlc() -> Path:
     instructions when not found — this is a hard dependency, never skipped.
     """
     env = os.environ.get("VLC_BINARY")
-    if env and Path(env).exists():
-        return Path(env)
+    if env:
+        p = Path(env)
+        if p.is_file() and (os.name != "posix" or os.access(p, os.X_OK)):
+            return p
+        # An explicit VLC_BINARY that points nowhere runnable must fail loudly so
+        # `doctor` does not report ready against something unusable.
+        raise RuntimeError(
+            f"VLC_BINARY is set to '{env}', which is not an executable VLC binary. "
+            "Unset VLC_BINARY to search PATH, or point it at the vlc/vlc.exe executable."
+        )
     for name in ("vlc", "cvlc", "vlc.exe"):
         found = shutil.which(name)
         if found:
@@ -44,21 +53,45 @@ def find_vlc() -> Path:
 def run_transcode(job: Dict[str, Any], timeout: int = 600) -> Dict[str, Any]:
     """Transcode the first input to the job's output using the real VLC engine."""
     vlc = find_vlc()
-    chain = build_transcode_sout(job)
     inputs = job.get("inputs") or []
     if not inputs:
         raise ValueError("job has no inputs")
     out = job["output"]["path"]
+
+    # P1: never let the output clobber the source VLC is still reading.
+    if Path(out).resolve() == Path(inputs[0]).resolve():
+        raise ValueError(
+            f"refusing to transcode: output '{out}' aliases the input '{inputs[0]}'"
+        )
+
+    # P1: write to a temp sibling and replace on success, so a pre-existing
+    # destination can never be mistaken for a freshly produced result when VLC
+    # exits 0 without writing anything.
+    final = Path(out)
+    final.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".vlc-tc-", suffix=final.suffix or ".tmp",
+                                    dir=str(final.parent))
+    os.close(fd)
+    tmp = Path(tmp_name)
+    tmp.unlink(missing_ok=True)  # let VLC create the file fresh
+
+    tmp_job = dict(job)
+    tmp_job["output"] = dict(job.get("output", {}))
+    tmp_job["output"]["path"] = str(tmp)
+    chain = build_transcode_sout(tmp_job)
     cmd: List[str] = [
         str(vlc), "-I", "dummy", "--play-and-exit", "--quiet",
         "--sout", chain, str(inputs[0]),
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:
+        tmp.unlink(missing_ok=True)
         raise RuntimeError(f"vlc exited {result.returncode}: {result.stderr[-800:]}")
-    p = Path(out)
-    if not p.exists():
-        raise RuntimeError(f"VLC produced no output at {out}\n{result.stderr[-800:]}")
+    if not tmp.exists() or tmp.stat().st_size == 0:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(f"VLC produced no output for {out}\n{result.stderr[-800:]}")
+    os.replace(tmp, final)  # atomic publish only after a genuine, non-empty write
+    p = final
     return {
         "output": str(p),
         "format": job["output"].get("format"),
@@ -68,14 +101,15 @@ def run_transcode(job: Dict[str, Any], timeout: int = 600) -> Dict[str, Any]:
     }
 
 
-def run_stream(job: Dict[str, Any], run_time: int = 2, timeout: int = 120) -> Dict[str, Any]:
+def run_stream(job: Dict[str, Any], run_time: int = None, timeout: int = None) -> Dict[str, Any]:
     """Stream the first input over the network using the real VLC engine.
 
-    ``run_time`` keeps the process bounded so it exits (used by tests / demos). Real
-    streaming sessions would omit it.
+    ``run_time`` keeps the process bounded so it exits (used by tests / demos).
+    Omitting it (``run_time=None``) yields a persistent stream with no VLC time
+    limit, matching the documented "omit --run-time" workflow.
 
-    The subprocess timeout is scaled with ``run_time`` so a long requested stream is
-    not killed mid-run by the default 120s ceiling.
+    When ``run_time`` is set, the subprocess timeout is scaled with it so a long
+    requested stream is not killed mid-run by the default 120s ceiling.
     """
     vlc = find_vlc()
     chain = build_stream_sout(job)
@@ -83,13 +117,22 @@ def run_stream(job: Dict[str, Any], run_time: int = 2, timeout: int = 120) -> Di
     if not inputs:
         raise ValueError("job has no inputs")
     s = job.get("stream") or {}
-    cmd: List[str] = [
-        str(vlc), "-I", "dummy", "--play-and-exit", "--quiet",
-        f"--run-time={run_time}",
-        "--sout", chain, str(inputs[0]),
-    ]
-    # Always allow the process to outlive its requested run time by a margin.
-    effective_timeout = max(int(timeout), int(run_time) + 30)
+    if run_time is None:
+        cmd: List[str] = [
+            str(vlc), "-I", "dummy", "--play-and-exit", "--quiet",
+            "--sout", chain, str(inputs[0]),
+        ]
+        effective_timeout = timeout  # None => unbounded (persistent)
+        note = "persistent stream (no run-time limit)"
+    else:
+        cmd = [
+            str(vlc), "-I", "dummy", "--play-and-exit", "--quiet",
+            f"--run-time={run_time}",
+            "--sout", chain, str(inputs[0]),
+        ]
+        # Always allow the process to outlive its requested run time by a margin.
+        effective_timeout = max(int(timeout or 120), int(run_time) + 30)
+        note = f"streamed for {run_time}s then exited"
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=effective_timeout)
     if result.returncode != 0:
         raise RuntimeError(f"vlc exited {result.returncode}: {result.stderr[-800:]}")
@@ -98,7 +141,7 @@ def run_stream(job: Dict[str, Any], run_time: int = 2, timeout: int = 120) -> Di
         "destination": f"{s.get('dst', '127.0.0.1')}:{s.get('port', 1234)}",
         "method": "vlc-stream",
         "returncode": result.returncode,
-        "note": f"streamed for {run_time}s then exited",
+        "note": note,
     }
 
 

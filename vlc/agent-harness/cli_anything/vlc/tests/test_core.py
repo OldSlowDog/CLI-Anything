@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import struct
 import subprocess
 import wave
@@ -291,3 +292,81 @@ def test_registry_names_not_in_both_files():
 
     dup = _names(local) & _names(public)
     assert not dup, f"names present in both registries: {sorted(dup)}"
+
+
+# ── second-round review fixes ──────────────────────────────────────────
+
+def test_transcode_rejects_output_equal_to_input(monkeypatch):
+    # P1: output that aliases the input would clobber the source being read.
+    monkeypatch.setattr(vlc_backend, "find_vlc", lambda: Path("vlc-stub"))
+    j = proj.new_job()
+    j["inputs"].append("/media/clip.mp4")
+    j["output"] = {"path": "/media/clip.mp4", "format": "mp4"}
+    with pytest.raises(ValueError):
+        vlc_backend.run_transcode(j)
+
+
+def test_run_stream_persistent_omits_run_time(monkeypatch):
+    # P1: omitting run-time must yield a persistent stream (no --run-time, no
+    # bounded subprocess timeout).
+    captured = {}
+    monkeypatch.setattr(vlc_backend, "find_vlc", lambda: Path("vlc-stub"))
+
+    def _fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        captured["timeout"] = kw.get("timeout")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(vlc_backend.subprocess, "run", _fake_run)
+    j = proj.new_job()
+    j["inputs"].append("in.mp4")
+    j["stream"] = {"protocol": "udp", "dst": "127.0.0.1", "port": 6004, "mux": "ts"}
+    res = vlc_backend.run_stream(j)  # run_time omitted -> persistent
+    assert not any(a.startswith("--run-time") for a in captured["cmd"])
+    assert captured["timeout"] is None
+    assert "persistent" in res["note"]
+
+
+def test_find_vlc_rejects_directory_binary(monkeypatch, tmp_path):
+    # P2: VLC_BINARY pointing at a directory (not a file) must fail loudly on
+    # every platform, rather than making `doctor` report ready.
+    a_dir = tmp_path / "vlc_dir"
+    a_dir.mkdir()
+    monkeypatch.setenv("VLC_BINARY", str(a_dir))
+    with pytest.raises(RuntimeError):
+        vlc_backend.find_vlc()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the exec-bit check is POSIX-only")
+def test_find_vlc_rejects_non_executable_file(monkeypatch, tmp_path):
+    # P2: a regular non-executable file must fail (POSIX exec-bit check).
+    not_exe = tmp_path / "not_vlc"
+    not_exe.write_text("hello", encoding="utf-8")
+    not_exe.chmod(0o644)  # readable, not executable
+    monkeypatch.setenv("VLC_BINARY", str(not_exe))
+    with pytest.raises(RuntimeError):
+        vlc_backend.find_vlc()
+
+
+def test_cli_mutation_malformed_project_structured(tmp_path):
+    # P2: mutation commands must emit a structured --json error on malformed JSON,
+    # not a traceback.
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not valid json", encoding="utf-8")
+    media_file = tmp_path / "in.mp4"
+    media_file.write_text("x", encoding="utf-8")
+    runner = CliRunner()
+    r = runner.invoke(vlc_cli.cli, ["--json", "--project", str(bad), "add-input", str(media_file)])
+    assert r.exit_code == 1
+    assert json.loads(r.output).get("error")
+
+
+def test_repl_shlex_handles_spaces_and_backslashes():
+    # P2: the REPL tokenizer must keep Windows backslashes literal while still
+    # respecting quotes around paths containing spaces.
+    import shlex as _shlex
+    line = r'add-input "C:\Users\me\my clip.mp4"'
+    lexer = _shlex.shlex(line, posix=False)
+    lexer.whitespace_split = True
+    parts = [t[1:-1] if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'" else t for t in lexer]
+    assert parts == ["add-input", r"C:\Users\me\my clip.mp4"]

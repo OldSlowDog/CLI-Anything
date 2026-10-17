@@ -10,6 +10,7 @@ VLC's ``--sout`` engine. Supports a stateful REPL with undo/redo and scripted
 from __future__ import annotations
 
 import json
+import shlex
 import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -52,7 +53,11 @@ def _load_or_new(project: Optional[Path]) -> Dict[str, Any]:
 def _apply(ctx: click.Context, label: str, mutator: Callable[[Dict[str, Any]], None]) -> None:
     """Load (or create) the job, apply a mutation, persist if --project given, emit."""
     json_mode, project = _ctx_state(ctx)
-    job = _load_or_new(project)
+    try:
+        job = _load_or_new(project)
+    except Exception as e:  # noqa: BLE001 — malformed/missing project -> structured error
+        _emit({"error": type(e).__name__, "detail": str(e)}, json_mode)
+        sys.exit(1)
     sess = Session(job, project)
     sess.mutate(label, mutator)
     saved = False
@@ -133,7 +138,12 @@ def project_show(ctx: click.Context) -> None:
     json_mode, project = _ctx_state(ctx)
     if not project or not Path(project).is_file():
         raise click.ClickException("no --project file given or it does not exist")
-    _emit(proj.job_summary(proj.load_job(project)), json_mode)
+    try:
+        loaded = proj.load_job(project)
+    except Exception as e:  # noqa: BLE001 — malformed project -> structured error
+        _emit({"error": type(e).__name__, "detail": str(e)}, json_mode)
+        sys.exit(1)
+    _emit(proj.job_summary(loaded), json_mode)
 
 
 # ── mutation commands ───────────────────────────────────────────────────
@@ -220,9 +230,10 @@ def transcode(ctx: click.Context) -> None:
 
 
 @cli.command()
-@click.option("--run-time", default=2, type=int, help="Seconds to stream before exiting")
+@click.option("--run-time", "run_time", default=None, type=int,
+              help="Seconds to stream before exiting; omit for a persistent stream")
 @click.pass_context
-def stream(ctx: click.Context, run_time: int) -> None:
+def stream(ctx: click.Context, run_time: Optional[int]) -> None:
     """Stream the job's input over the network via the real VLC engine."""
     json_mode, _ = _ctx_state(ctx)
     _guard(lambda: run_stream(_run_job(ctx), run_time=run_time), json_mode)
@@ -311,7 +322,16 @@ def _repl(project: Optional[Path] = None) -> None:
             return
         if not line:
             continue
-        parts = line.split()
+        # Tokenise like a shell (quoted paths with spaces) while keeping Windows
+        # backslash paths intact: non-POSIX lexing (backslashes stay literal),
+        # then strip one pair of surrounding quotes from each token.
+        try:
+            lexer = shlex.shlex(line, posix=False)
+            lexer.whitespace_split = True
+            parts = [tok[1:-1] if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in "\"'"
+                     else tok for tok in lexer]
+        except ValueError:
+            parts = line.split()  # unbalanced quotes -> best effort
         cmd, args = parts[0].lower(), parts[1:]
 
         if cmd in ("quit", "exit"):

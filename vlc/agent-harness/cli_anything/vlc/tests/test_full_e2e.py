@@ -70,6 +70,25 @@ def test_transcode_wav_to_wav(sample_wav, tmp_path):
     assert out.read_bytes()[:4] == b"RIFF"
 
 
+def test_transcode_replaces_stale_output(sample_wav, tmp_path):
+    # A pre-existing destination (from a prior run) must be replaced by genuinely
+    # fresh output, never passed off as success on stale bytes.
+    j = proj.new_job()
+    j["inputs"] = [str(sample_wav)]
+    out = tmp_path / "out.wav"
+    out.write_bytes(b"STALE" * 200)  # junk from a previous run
+    j["output"] = {"path": str(out), "format": "wav"}
+    j["transcode"] = {
+        "vcodec": None, "acodec": "wav", "vbitrate": None, "abitrate": None,
+        "scale": 1.0, "width": None, "height": None, "fps": None,
+        "channels": 1, "samplerate": 8000, "extra": [],
+    }
+    result = vlc_backend.run_transcode(j)
+    assert out.is_file(), result
+    assert out.read_bytes()[:4] == b"RIFF"  # replaced, not the stale "STALE" bytes
+    assert out.stat().st_size > 1000
+
+
 def test_info_wav(sample_wav):
     info = vlc_backend.run_info(sample_wav)
     assert info["path"] == str(sample_wav)
