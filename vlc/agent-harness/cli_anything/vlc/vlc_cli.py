@@ -105,7 +105,7 @@ def cli(ctx: click.Context, json_mode: bool, project: Optional[Path]) -> None:
     ctx.obj["json"] = json_mode
     ctx.obj["project"] = project
     if ctx.invoked_subcommand is None:
-        _repl()
+        _repl(project)
 
 
 # ── project group ───────────────────────────────────────────────────────
@@ -214,8 +214,9 @@ def clear_job(ctx: click.Context) -> None:
 def transcode(ctx: click.Context) -> None:
     """Transcode the job's first input to its output via the real VLC engine."""
     json_mode, _ = _ctx_state(ctx)
-    job = _run_job(ctx)
-    _guard(lambda: run_transcode(job), json_mode)
+    # Load the job inside the guard so missing/malformed projects surface as
+    # structured --json errors instead of a Click traceback.
+    _guard(lambda: run_transcode(_run_job(ctx)), json_mode)
 
 
 @cli.command()
@@ -224,8 +225,7 @@ def transcode(ctx: click.Context) -> None:
 def stream(ctx: click.Context, run_time: int) -> None:
     """Stream the job's input over the network via the real VLC engine."""
     json_mode, _ = _ctx_state(ctx)
-    job = _run_job(ctx)
-    _guard(lambda: run_stream(job, run_time=run_time), json_mode)
+    _guard(lambda: run_stream(_run_job(ctx), run_time=run_time), json_mode)
 
 
 @cli.command()
@@ -233,8 +233,7 @@ def stream(ctx: click.Context, run_time: int) -> None:
 def snapshot(ctx: click.Context) -> None:
     """Extract a still frame from the job's input via the real VLC engine."""
     json_mode, _ = _ctx_state(ctx)
-    job = _run_job(ctx)
-    _guard(lambda: run_snapshot(job), json_mode)
+    _guard(lambda: run_snapshot(_run_job(ctx)), json_mode)
 
 
 @cli.command()
@@ -287,11 +286,16 @@ _REPL_COMMANDS = {
 }
 
 
-def _repl() -> None:
+def _repl(project: Optional[Path] = None) -> None:
     skin = ReplSkin("vlc", version=__version__)
     skin.print_banner()
     session = Session()
     project_path: List[Optional[Path]] = [None]
+    # Honour an explicit --project passed at launch: load it into the session so the
+    # REPL starts from the saved job instead of a blank one.
+    if project and Path(project).is_file():
+        session = Session(proj.load_job(Path(project)), Path(project))
+        project_path[0] = Path(project)
     pt = skin.create_prompt_session()
 
     def _persist() -> None:
@@ -383,9 +387,11 @@ def _repl() -> None:
                 skin.status_block({k: str(v) for k, v in run_info(Path(args[0])).items() if v is not None})
             elif cmd == "undo":
                 label = session.undo()
+                _persist()
                 skin.info(f"undid: {label}" if label else "nothing to undo")
             elif cmd == "redo":
                 label = session.redo()
+                _persist()
                 skin.info(f"redid: {label}" if label else "nothing to redo")
             else:
                 skin.error(f"unknown command: {cmd} (type 'help')")

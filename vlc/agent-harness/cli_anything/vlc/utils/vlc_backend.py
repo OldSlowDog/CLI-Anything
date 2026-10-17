@@ -73,6 +73,9 @@ def run_stream(job: Dict[str, Any], run_time: int = 2, timeout: int = 120) -> Di
 
     ``run_time`` keeps the process bounded so it exits (used by tests / demos). Real
     streaming sessions would omit it.
+
+    The subprocess timeout is scaled with ``run_time`` so a long requested stream is
+    not killed mid-run by the default 120s ceiling.
     """
     vlc = find_vlc()
     chain = build_stream_sout(job)
@@ -85,7 +88,9 @@ def run_stream(job: Dict[str, Any], run_time: int = 2, timeout: int = 120) -> Di
         f"--run-time={run_time}",
         "--sout", chain, str(inputs[0]),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    # Always allow the process to outlive its requested run time by a margin.
+    effective_timeout = max(int(timeout), int(run_time) + 30)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=effective_timeout)
     if result.returncode != 0:
         raise RuntimeError(f"vlc exited {result.returncode}: {result.stderr[-800:]}")
     return {
@@ -107,20 +112,24 @@ def run_snapshot(job: Dict[str, Any], timeout: int = 120) -> Dict[str, Any]:
     inputs = job.get("inputs") or []
     if not inputs:
         raise ValueError("job has no inputs")
-    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    scene_dir = Path(out_dir)
+    scene_dir.mkdir(parents=True, exist_ok=True)
+    # Record pre-existing PNGs so a reused directory never leaks stale files into
+    # the result (and the lexicographically-last file is not an unrelated old one).
+    pre_existing = set(scene_dir.glob("*.png"))
     args = build_snapshot_args(job)
     cmd: List[str] = [str(vlc), "-I", "dummy", "--play-and-exit", *args, str(inputs[0])]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:
         raise RuntimeError(f"vlc exited {result.returncode}: {result.stderr[-800:]}")
-    scene_dir = Path(out_dir)
-    pngs = sorted(scene_dir.glob("*.png"))
-    if not pngs:
-        raise RuntimeError(f"VLC produced no snapshot in {out_dir}\n{result.stderr[-800:]}")
-    last = pngs[-1]
+    produced = [p for p in scene_dir.glob("*.png") if p not in pre_existing]
+    if not produced:
+        raise RuntimeError(f"VLC produced no new snapshot in {out_dir}\n{result.stderr[-800:]}")
+    # Most recent file this run produced (robust against naming/sort quirks).
+    last = max(produced, key=lambda p: p.stat().st_mtime)
     return {
         "snapshot": str(last),
-        "count": len(pngs),
+        "count": len(produced),
         "file_size": last.stat().st_size,
         "method": "vlc-scene",
     }
@@ -134,6 +143,11 @@ def run_info(input_path, timeout: int = 120) -> Dict[str, Any]:
         "--no-video-title-show", str(input_path),
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"VLC exited {result.returncode} while probing {input_path}\n"
+            f"{result.stderr[-800:]}"
+        )
     combined = (result.stdout or "") + "\n" + (result.stderr or "")
     info = parse_vlc_stats(combined)
     info["path"] = str(input_path)

@@ -122,10 +122,14 @@ def _transcode_block(job: Dict[str, Any]) -> str:
     """Return the ``transcode{...}`` fragment (possibly empty)."""
     t = job.get("transcode", {}) or {}
     params: List[str] = []
-    if t.get("vcodec"):
-        params.append(f"vcodec={resolve_video_codec(t['vcodec'])}")
-    if t.get("acodec"):
-        params.append(f"acodec={resolve_audio_codec(t['acodec'])}")
+    # ``copy`` / ``none`` resolve to None — drop the param rather than emitting
+    # a literal ``vcodec=None`` / ``acodec=None`` that VLC cannot parse.
+    vcodec = resolve_video_codec(t["vcodec"]) if t.get("vcodec") else None
+    if vcodec:
+        params.append(f"vcodec={vcodec}")
+    acodec = resolve_audio_codec(t["acodec"]) if t.get("acodec") else None
+    if acodec:
+        params.append(f"acodec={acodec}")
     if t.get("vbitrate"):
         params.append(f"vb={int(t['vbitrate'])}")
     if t.get("abitrate"):

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import struct
+import subprocess
 import wave
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from cli_anything.vlc.core import project as proj
 from cli_anything.vlc.core import session as sess_mod
 from cli_anything.vlc.core import transcode
 from cli_anything.vlc.core import media
+from cli_anything.vlc.utils import vlc_backend
 
 
 # ── core.project ───────────────────────────────────────────────────────
@@ -186,3 +188,106 @@ def test_cli_doctor_without_vlc(monkeypatch):
     r = runner.invoke(vlc_cli.cli, ["--json", "doctor"])
     assert r.exit_code == 1
     assert json.loads(r.output)["ready"] is False
+
+
+def test_cli_transcode_missing_project_is_structured_json(tmp_path):
+    # P2 fix: a missing project must surface as a structured --json error, not a traceback.
+    runner = CliRunner()
+    missing = tmp_path / "nope.json"
+    r = runner.invoke(vlc_cli.cli, ["--json", "--project", str(missing), "transcode"])
+    assert r.exit_code == 1
+    payload = json.loads(r.output)
+    assert payload.get("error")
+    assert "project" in payload.get("detail", "").lower()
+
+
+# ── P1/P2 review fixes ─────────────────────────────────────────────────
+
+def test_transcode_copy_and_none_codecs_omitted():
+    # copy / none resolve to None -> must NOT emit the literal "vcodec=None".
+    j = proj.new_job()
+    j["inputs"].append("in.mp4")
+    j["output"] = {"path": "out.mkv", "format": "mkv"}
+    j["transcode"]["vcodec"] = "copy"
+    j["transcode"]["acodec"] = "none"
+    s = transcode.build_transcode_sout(j)
+    assert "vcodec=None" not in s
+    assert "acodec=None" not in s
+    assert "vcodec=copy" not in s
+    assert "acodec=none" not in s
+
+
+def test_run_stream_timeout_scales_with_run_time(monkeypatch):
+    # P1 fix: a long --run-time must not be killed by the fixed 120s subprocess timeout.
+    captured = {}
+
+    monkeypatch.setattr(vlc_backend, "find_vlc", lambda: Path("vlc-stub"))
+
+    def _fake_run(cmd, **kw):
+        captured["timeout"] = kw.get("timeout")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(vlc_backend.subprocess, "run", _fake_run)
+
+    j = proj.new_job()
+    j["inputs"].append("in.mp4")
+    j["stream"] = {"protocol": "rtp", "dst": "127.0.0.1", "port": 1234, "mux": "ts"}
+    vlc_backend.run_stream(j, run_time=300)
+    assert captured["timeout"] >= 300
+
+    # short run keeps the historical 120s floor
+    captured.clear()
+    vlc_backend.run_stream(j, run_time=1)
+    assert captured["timeout"] >= 120
+
+
+def test_run_snapshot_ignores_stale_files(monkeypatch, tmp_path):
+    # P1 fix: a reused directory must not leak pre-existing PNGs into the result,
+    # and the lexicographically-last stale file must not be returned.
+    shot = tmp_path / "shots"
+    shot.mkdir()
+    stale = shot / "zzzz_old.png"  # would win a naive sorted()[-1]
+    stale.write_bytes(b"\x89PNG-stale")
+
+    def _fake_run(cmd, **kw):
+        (shot / "scene00001.png").write_bytes(b"\x89PNG-new")  # VLC's real output
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(vlc_backend, "find_vlc", lambda: Path("vlc-stub"))
+    monkeypatch.setattr(vlc_backend.subprocess, "run", _fake_run)
+
+    j = proj.new_job()
+    j["inputs"].append("in.mp4")
+    j["snapshot"] = {"path": str(shot), "time": 1.0, "ratio": 1}
+    result = vlc_backend.run_snapshot(j)
+    assert Path(result["snapshot"]).name == "scene00001.png"
+    assert result["count"] == 1  # only the file produced by this run
+
+
+def test_run_info_propagates_nonzero_exit(monkeypatch):
+    # P2 fix: a failing VLC probe must surface as an error (not a silent dict).
+
+    def _fake_run(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom")
+
+    monkeypatch.setattr(vlc_backend, "find_vlc", lambda: Path("vlc-stub"))
+    monkeypatch.setattr(vlc_backend.subprocess, "run", _fake_run)
+    with pytest.raises(RuntimeError):
+        vlc_backend.run_info("/dev/null")
+
+
+def test_registry_names_not_in_both_files():
+    # P2 fix: CLI-Hub concatenates registry.json + public_registry.json without
+    # dedup, so a name must not appear in both. Runs only in the monorepo checkout.
+    root = Path(__file__).resolve().parents[5]
+    local = root / "registry.json"
+    public = root / "public_registry.json"
+    if not (local.is_file() and public.is_file()):
+        pytest.skip("registry files not present (standalone install)")
+
+    def _names(path):
+        with open(path, encoding="utf-8") as fh:
+            return {c["name"] for c in json.load(fh).get("clis", [])}
+
+    dup = _names(local) & _names(public)
+    assert not dup, f"names present in both registries: {sorted(dup)}"
