@@ -21,11 +21,14 @@
   persistence, `set-output`/`set-stream`, `transcode` requires `--project`, `doctor`
   without VLC, structured `--json` errors for missing / malformed / schema-invalid projects
 - `TestBackendSafety` — stream timeout scaling with `--run-time`, persistent stream when
-  run-time is omitted, snapshot isolation from stale files and across re-runs, temp-file
-  cleanup on subprocess failure, `run_info` propagating a nonzero exit, `VLC_BINARY`
-  validation, registry de-duplication
-- `TestRepl` — `new` detaching an opened project, shell-like tokenising of quoted
-  Windows paths
+  run-time is omitted, `info` probe bounded independently of media length, snapshot
+  isolation from stale files and across re-runs, temp-file cleanup on subprocess
+  failure, `run_info` propagating a nonzero exit, `VLC_BINARY` validation, registry
+  de-duplication
+- `TestRepl` — `new` detaching an opened project, binding a not-yet-existing
+  `--project`, shell-like tokenising of quoted Windows paths
+- `TestOptionValidation` — unknown `set-option` keys rejected on both the Click and
+  REPL paths without persisting anything
 
 ### E2E Test Plan (`test_full_e2e.py`)
 
@@ -46,7 +49,7 @@ E2E paths run without ffmpeg.
 
 ```
 platform win32 -- Python 3.14.3, pytest-9.1.1
-collected 34 items
+collected 39 items
 
 test_new_job_defaults PASSED
 test_save_and_load_roundtrip PASSED
@@ -82,11 +85,16 @@ test_cli_mutation_schema_invalid_project_is_structured PASSED
 test_repl_new_detaches_opened_project PASSED
 test_run_transcode_removes_temp_when_subprocess_raises PASSED
 test_run_snapshot_rerun_same_directory_succeeds PASSED
+test_load_job_normalizes_null_inputs PASSED
+test_run_info_bounds_playback PASSED
+test_repl_binds_missing_project_path PASSED
+test_set_option_rejects_unknown_key PASSED
+test_repl_set_option_rejects_unknown_key PASSED
 
-============================= 33 passed, 1 skipped in 0.80s =============================
+============================= 38 passed, 1 skipped in 0.83s =============================
 ```
 
-**Summary:** 33 passed, 1 skipped (`test_find_vlc_rejects_non_executable_file` — the
+**Summary:** 38 passed, 1 skipped (`test_find_vlc_rejects_non_executable_file` — the
 exec-bit check is POSIX-only). No external dependency (VLC / ffmpeg) required.
 
 #### Regression-proofing of the review fixes
@@ -100,6 +108,7 @@ test that would pass either way:
 | 1st (`8d1a22a`) | 9 | codec `None` omission, stream timeout scaling, snapshot stale-file isolation, `run_info` exit propagation, structured project errors, registry de-duplication, SKILL.md option order |
 | 2nd (`cb6fe9e`) | 7 | output aliases input, stale destination rejected, persistent stream, guarded malformed projects, REPL `shlex`, `VLC_BINARY` validation, `.gitignore` scoping |
 | 3rd (`7d5c4e1`) | 4 | `new` detaches an opened project, schema-invalid projects rejected at load *and* inside the guard, temp-file cleanup on subprocess failure, per-run snapshot prefix |
+| 4th (`77f42fc`) | 4 | `info` playback bounded independently of media length, explicit-null containers normalised at load, REPL binds a not-yet-existing `--project`, unknown `set-option` keys rejected |
 
 ### E2E — `pytest cli_anything/vlc/tests/test_full_e2e.py -v` (real VLC 3.0.21)
 
