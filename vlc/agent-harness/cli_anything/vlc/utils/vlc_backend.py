@@ -22,6 +22,10 @@ from ..core.transcode import (
 )
 from ..core.media import parse_vlc_stats
 
+# `info` plays the input only long enough for VLC to emit stats, so a probe returns in
+# bounded time regardless of how long the media is.
+_INFO_PROBE_SECONDS = 2
+
 
 def find_vlc() -> Path:
     """Locate the VLC binary.
@@ -190,13 +194,21 @@ def run_snapshot(job: Dict[str, Any], timeout: int = 120) -> Dict[str, Any]:
 
 
 def run_info(input_path, timeout: int = 120) -> Dict[str, Any]:
-    """Probe a media file via VLC dummy-mode stats (best-effort parse)."""
+    """Probe a media file via VLC dummy-mode stats (best-effort parse).
+
+    Playback is deliberately bounded to ``_INFO_PROBE_SECONDS``: ``--play-and-exit``
+    otherwise waits for EOF, so probing anything longer than ``timeout`` aborts
+    instead of returning metadata, and shorter media still costs its full playback
+    duration. The subprocess timeout is sized from that bound, not from media length.
+    """
     vlc = find_vlc()
     cmd: List[str] = [
         str(vlc), "-I", "dummy", "--play-and-exit", "--stats",
+        f"--run-time={_INFO_PROBE_SECONDS}",
         "--no-video-title-show", str(input_path),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    effective = max(int(timeout or 120), int(_INFO_PROBE_SECONDS) + 30)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=effective)
     if result.returncode != 0:
         raise RuntimeError(
             f"VLC exited {result.returncode} while probing {input_path}\n"

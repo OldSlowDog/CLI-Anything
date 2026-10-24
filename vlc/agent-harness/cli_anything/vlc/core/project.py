@@ -88,6 +88,20 @@ def _schema_problems(job: Any) -> List[str]:
     return problems
 
 
+def _normalize(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Coerce explicit nulls for defaulted containers to their defaults.
+
+    ``{"software": "vlc", "inputs": null}`` has a valid *shape* but would break
+    ``job_summary`` (``list(None)`` / ``len(None)``) downstream, so an explicit null is
+    treated as "unset" — distinct from a missing key, which simply stays absent.
+    """
+    out = dict(job)
+    for key in ("inputs", "output", "transcode"):
+        if out.get(key) is None:
+            out[key] = copy.deepcopy(DEFAULT_JOB[key])
+    return out
+
+
 def load_job(path) -> Dict[str, Any]:
     """Load a job spec from a JSON file.
 
@@ -103,7 +117,7 @@ def load_job(path) -> Dict[str, Any]:
     problems = _schema_problems(data)
     if problems:
         raise ValueError("invalid VLC job spec: " + "; ".join(problems))
-    return data
+    return _normalize(data)
 
 
 def save_job(job: Dict[str, Any], path) -> Dict[str, Any]:

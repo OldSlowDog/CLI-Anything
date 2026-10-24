@@ -154,6 +154,18 @@ def project_show(ctx: click.Context) -> None:
 
 # ── mutation commands ───────────────────────────────────────────────────
 
+# The transcode options `set-option` accepts, mirroring its --help text. An unknown key
+# used to be persisted while `_transcode_block` ignored it, so a typo such as `vcdoec`
+# reported success and the transcode quietly kept the old codec.
+TRANSCODE_OPTION_KEYS = (
+    "vcodec", "acodec", "vbitrate", "abitrate", "scale",
+    "width", "height", "fps", "channels", "samplerate",
+)
+NUMERIC_OPTION_KEYS = frozenset(
+    {"vbitrate", "abitrate", "width", "height", "fps", "channels", "samplerate", "scale"}
+)
+
+
 @cli.command("add-input")
 @click.argument("file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.pass_context
@@ -181,11 +193,16 @@ def set_output(ctx: click.Context, file: Path, fmt: Optional[str]) -> None:
 def set_option(ctx: click.Context, key: str, value: str) -> None:
     """Set a transcode option (vcodec, acodec, vbitrate, abitrate, scale, width,
     height, fps, channels, samplerate). Numeric where appropriate."""
-    numeric = {"vbitrate", "abitrate", "width", "height", "fps", "channels", "samplerate", "scale"}
+    if key not in TRANSCODE_OPTION_KEYS:
+        json_mode, _ = _ctx_state(ctx)
+        _emit({"error": "ValueError",
+               "detail": f"unknown transcode option '{key}'. Known options: "
+                         + ", ".join(TRANSCODE_OPTION_KEYS)}, json_mode)
+        sys.exit(1)
 
     def _mut(j: Dict[str, Any]) -> None:
         t = j.setdefault("transcode", {})
-        t[key] = float(value) if key in numeric else value
+        t[key] = float(value) if key in NUMERIC_OPTION_KEYS else value
 
     _apply(ctx, f"set-option {key}={value}", _mut)
 
@@ -313,6 +330,12 @@ def _repl(project: Optional[Path] = None) -> None:
     if project and Path(project).is_file():
         session = Session(proj.load_job(Path(project)), Path(project))
         project_path[0] = Path(project)
+    elif project:
+        # A --project that does not exist yet is the file to *create*: bind it so
+        # mutations auto-save there and a bare `save` knows the destination (the
+        # non-REPL mutation commands create a missing project the same way).
+        session = Session(proj.new_job(), Path(project))
+        project_path[0] = Path(project)
     pt = skin.create_prompt_session()
 
     def _persist() -> None:
@@ -382,10 +405,13 @@ def _repl(project: Optional[Path] = None) -> None:
                 _persist(); skin.success("output set")
             elif cmd == "set-option":
                 key, val = args[0], args[1]
-                numeric = {"vbitrate", "abitrate", "width", "height", "fps", "channels", "samplerate", "scale"}
+                if key not in TRANSCODE_OPTION_KEYS:
+                    skin.error(f"unknown transcode option '{key}'. Known: "
+                               + ", ".join(TRANSCODE_OPTION_KEYS))
+                    continue
                 session.mutate(f"set-option {key}={val}",
                                lambda j: j.setdefault("transcode", {}).__setitem__(
-                                   key, float(val) if key in numeric else val))
+                                   key, float(val) if key in NUMERIC_OPTION_KEYS else val))
                 _persist(); skin.success(f"{key} = {val}")
             elif cmd == "set-stream":
                 proto, dst, port = (args + ["rtp", "127.0.0.1", "1234"])[:3]

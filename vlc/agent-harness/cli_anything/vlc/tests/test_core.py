@@ -511,3 +511,140 @@ def test_run_snapshot_rerun_same_directory_succeeds(monkeypatch, tmp_path):
     assert first["count"] == 1 and second["count"] == 1
     assert Path(first["snapshot"]) != Path(second["snapshot"])
     assert prefixes[0] != prefixes[1]
+
+
+# ── fourth-round review fixes ───────────────────────────────────────────
+
+def test_load_job_normalizes_null_inputs(tmp_path):
+    # Fourth-round fix: an explicit null for a defaulted container means "unset", not a
+    # type error waiting to blow up in job_summary (list(None) / len(None)).
+    p = tmp_path / "null.json"
+    p.write_text(json.dumps({"software": "vlc", "inputs": None}), encoding="utf-8")
+    job = proj.load_job(p)
+    assert job["inputs"] == []
+    assert proj.job_summary(job)["input_count"] == 0
+
+
+def test_run_info_bounds_playback(monkeypatch):
+    # Fourth-round fix (P1): a probe must return in bounded time regardless of media
+    # length, instead of waiting for EOF and being killed by the fixed timeout.
+    captured = {}
+    monkeypatch.setattr(vlc_backend, "find_vlc", lambda: Path("vlc-stub"))
+
+    def _fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        captured["timeout"] = kw.get("timeout")
+        return subprocess.CompletedProcess(cmd, 0, stdout="duration: 1 s", stderr="")
+
+    monkeypatch.setattr(vlc_backend.subprocess, "run", _fake_run)
+    vlc_backend.run_info("/media/long.mp4", timeout=5)
+
+    run_time = next(a for a in captured["cmd"] if a.startswith("--run-time="))
+    assert int(run_time.split("=", 1)[1]) <= 5  # playback is bounded, not media-length
+    # timeout is sized from the probe window, never below it
+    assert captured["timeout"] == vlc_backend._INFO_PROBE_SECONDS + 30
+
+
+def test_repl_binds_missing_project_path(tmp_path, monkeypatch):
+    # Fourth-round fix: `--project new.json` that does not exist yet is the file to
+    # create, so the REPL must bind it (auto-save + bare `save` destination).
+    job = tmp_path / "new.json"
+    script = [f"set-output {tmp_path / 'o.mp4'}", "quit"]
+
+    class _FakeSkin:
+        def __init__(self, *a, **k):
+            pass
+
+        def print_banner(self):
+            pass
+
+        def create_prompt_session(self):
+            return object()
+
+        def get_input(self, pt, project_name=None, modified=False):
+            return script.pop(0) if script else "quit"
+
+        def success(self, *a, **k):
+            pass
+
+        def error(self, *a, **k):
+            pass
+
+        def info(self, *a, **k):
+            pass
+
+        def status_block(self, *a, **k):
+            pass
+
+        def help(self, *a, **k):
+            pass
+
+        def print_goodbye(self):
+            pass
+
+    monkeypatch.setattr(vlc_cli, "ReplSkin", _FakeSkin)
+    vlc_cli._repl(job)
+
+    assert job.is_file(), "the requested --project path should have been created"
+    saved = json.loads(job.read_text(encoding="utf-8"))
+    assert saved["output"]["path"].endswith("o.mp4")
+
+
+def test_set_option_rejects_unknown_key(tmp_path):
+    # Fourth-round fix: a mistyped option key must fail loudly instead of being
+    # persisted and then silently ignored by the sout builder.
+    job = tmp_path / "job.json"
+    proj.save_job(proj.new_job(), job)
+    before = job.read_text(encoding="utf-8")
+
+    runner = CliRunner()
+    r = runner.invoke(vlc_cli.cli, ["--json", "--project", str(job),
+                                    "set-option", "vcdoec", "h265"])
+    assert r.exit_code == 1
+    payload = json.loads(r.output)
+    assert payload.get("error")
+    assert "vcdoec" in payload.get("detail", "")
+    assert "vcodec" in payload.get("detail", "")  # the documented set is offered back
+    assert job.read_text(encoding="utf-8") == before  # nothing persisted
+    assert "vcdoec" not in job.read_text(encoding="utf-8")
+
+
+def test_repl_set_option_rejects_unknown_key(tmp_path, monkeypatch):
+    # Same guard on the REPL path.
+    errors = []
+    script = ["set-option vcdoec h265", "quit"]
+
+    class _FakeSkin:
+        def __init__(self, *a, **k):
+            pass
+
+        def print_banner(self):
+            pass
+
+        def create_prompt_session(self):
+            return object()
+
+        def get_input(self, pt, project_name=None, modified=False):
+            return script.pop(0) if script else "quit"
+
+        def success(self, *a, **k):
+            pass
+
+        def error(self, msg):
+            errors.append(msg)
+
+        def info(self, *a, **k):
+            pass
+
+        def status_block(self, *a, **k):
+            pass
+
+        def help(self, *a, **k):
+            pass
+
+        def print_goodbye(self):
+            pass
+
+    monkeypatch.setattr(vlc_cli, "ReplSkin", _FakeSkin)
+    vlc_cli._repl(None)
+    assert errors and "vcdoec" in errors[0]
