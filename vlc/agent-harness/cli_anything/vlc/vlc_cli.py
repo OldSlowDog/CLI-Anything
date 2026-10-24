@@ -51,23 +51,29 @@ def _load_or_new(project: Optional[Path]) -> Dict[str, Any]:
 
 
 def _apply(ctx: click.Context, label: str, mutator: Callable[[Dict[str, Any]], None]) -> None:
-    """Load (or create) the job, apply a mutation, persist if --project given, emit."""
+    """Load (or create) the job, apply a mutation, persist if --project given, emit.
+
+    The whole load → mutate → save → summarise sequence sits inside the structured
+    error guard. A schema-invalid project used to pass ``load_job`` and then raise
+    inside the mutator, i.e. *outside* any guard, so ``--json`` callers got a
+    traceback on stderr and an empty stdout.
+    """
     json_mode, project = _ctx_state(ctx)
     try:
         job = _load_or_new(project)
-    except Exception as e:  # noqa: BLE001 — malformed/missing project -> structured error
+        sess = Session(job, project)
+        sess.mutate(label, mutator)
+        saved = False
+        if project:
+            proj.save_job(sess.job, project)
+            saved = True
+        summary = proj.job_summary(sess.job)
+        summary["saved"] = saved
+        if project:
+            summary["project"] = str(project)
+    except Exception as e:  # noqa: BLE001 — load/mutate/save/summary -> structured error
         _emit({"error": type(e).__name__, "detail": str(e)}, json_mode)
         sys.exit(1)
-    sess = Session(job, project)
-    sess.mutate(label, mutator)
-    saved = False
-    if project:
-        proj.save_job(sess.job, project)
-        saved = True
-    summary = proj.job_summary(sess.job)
-    summary["saved"] = saved
-    if project:
-        summary["project"] = str(project)
     _emit(summary, json_mode)
 
 
@@ -344,7 +350,10 @@ def _repl(project: Optional[Path] = None) -> None:
         try:
             if cmd == "new":
                 session = Session()
-                skin.success("new job")
+                # Detach the opened project: `new` starts an in-memory job, so the
+                # next mutation must not silently overwrite the file we opened.
+                project_path[0] = None
+                skin.success("new job (unsaved — 'save <file>' to persist)")
             elif cmd == "open":
                 p = Path(args[0])
                 session = Session(proj.load_job(p), p)

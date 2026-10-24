@@ -183,14 +183,22 @@ def build_stream_sout(job: Dict[str, Any]) -> str:
     return f"#{_transcode_block(job)}:{dest}"
 
 
-def build_snapshot_args(job: Dict[str, Any]) -> List[str]:
-    """Build VLC arguments to extract a still frame via the scene video filter."""
+def build_snapshot_args(job: Dict[str, Any], scene_prefix: Optional[str] = None) -> List[str]:
+    """Build VLC arguments to extract a still frame via the scene video filter.
+
+    ``scene_prefix`` overrides VLC's scene filename prefix (default ``scene``). The
+    backend passes a unique prefix per invocation so that output can be attributed to
+    that run alone, even when the snapshot directory is reused — see
+    ``utils/vlc_backend.run_snapshot``.
+    """
     snap = job.get("snapshot") or {}
     path = (snap.get("path") or "").replace("\\", "/")
     ratio = int(snap.get("ratio", 1))
+    prefix = scene_prefix if scene_prefix is not None else (snap.get("prefix") or "scene")
     args = [
         "--video-filter=scene",
         f"--scene-path={path}",
+        f"--scene-prefix={prefix}",
         f"--scene-ratio={ratio}",
         "--scene-format=png",
         "--no-audio",

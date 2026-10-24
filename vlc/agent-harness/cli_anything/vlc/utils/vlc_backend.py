@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -83,14 +84,21 @@ def run_transcode(job: Dict[str, Any], timeout: int = 600) -> Dict[str, Any]:
         str(vlc), "-I", "dummy", "--play-and-exit", "--quiet",
         "--sout", chain, str(inputs[0]),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    if result.returncode != 0:
-        tmp.unlink(missing_ok=True)
-        raise RuntimeError(f"vlc exited {result.returncode}: {result.stderr[-800:]}")
-    if not tmp.exists() or tmp.stat().st_size == 0:
-        tmp.unlink(missing_ok=True)
-        raise RuntimeError(f"VLC produced no output for {out}\n{result.stderr[-800:]}")
-    os.replace(tmp, final)  # atomic publish only after a genuine, non-empty write
+    published = False
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if result.returncode != 0:
+            raise RuntimeError(f"vlc exited {result.returncode}: {result.stderr[-800:]}")
+        if not tmp.exists() or tmp.stat().st_size == 0:
+            raise RuntimeError(f"VLC produced no output for {out}\n{result.stderr[-800:]}")
+        os.replace(tmp, final)  # atomic publish only after a genuine, non-empty write
+        published = True
+    finally:
+        # A subprocess timeout (or any other failure) raises before the cleanup
+        # branches above would run, which used to leave a partial `.vlc-tc-*`
+        # sibling beside the destination; repeated slow jobs then ate disk.
+        if not published:
+            tmp.unlink(missing_ok=True)
     p = final
     return {
         "output": str(p),
@@ -157,15 +165,18 @@ def run_snapshot(job: Dict[str, Any], timeout: int = 120) -> Dict[str, Any]:
         raise ValueError("job has no inputs")
     scene_dir = Path(out_dir)
     scene_dir.mkdir(parents=True, exist_ok=True)
-    # Record pre-existing PNGs so a reused directory never leaks stale files into
-    # the result (and the lexicographically-last file is not an unrelated old one).
-    pre_existing = set(scene_dir.glob("*.png"))
-    args = build_snapshot_args(job)
+    # A unique prefix per invocation. VLC names scenes `<prefix>NNNNN.png`, so with a
+    # fixed prefix a reused directory makes this run overwrite a file a previous run
+    # already produced: the pathname-only diff against the pre-run set then comes out
+    # empty and a successful refresh is misreported as a failure. Globbing only our
+    # own prefix also keeps pre-existing PNGs out of both the result and the count.
+    prefix = f"vlc-snap-{os.getpid()}-{uuid.uuid4().hex[:8]}-"
+    args = build_snapshot_args(job, scene_prefix=prefix)
     cmd: List[str] = [str(vlc), "-I", "dummy", "--play-and-exit", *args, str(inputs[0])]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:
         raise RuntimeError(f"vlc exited {result.returncode}: {result.stderr[-800:]}")
-    produced = [p for p in scene_dir.glob("*.png") if p not in pre_existing]
+    produced = sorted(scene_dir.glob(f"{prefix}*.png"))
     if not produced:
         raise RuntimeError(f"VLC produced no new snapshot in {out_dir}\n{result.stderr[-800:]}")
     # Most recent file this run produced (robust against naming/sort quirks).

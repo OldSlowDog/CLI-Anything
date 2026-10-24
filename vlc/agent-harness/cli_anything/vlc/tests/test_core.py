@@ -113,6 +113,15 @@ def test_build_snapshot_args():
     assert "--start-time=2.0" in args
 
 
+def test_build_snapshot_args_scene_prefix():
+    # Third-round fix: the caller must be able to pin VLC's scene filename prefix.
+    j = proj.new_job()
+    j["snapshot"] = {"path": "/tmp/shots", "time": 2.0, "ratio": 1}
+    assert "--scene-prefix=scene" in transcode.build_snapshot_args(j)
+    custom = transcode.build_snapshot_args(j, scene_prefix="vlc-snap-abc-")
+    assert "--scene-prefix=vlc-snap-abc-" in custom
+
+
 # ── core.media ─────────────────────────────────────────────────────────
 
 def test_parse_vlc_stats_synthetic():
@@ -249,9 +258,12 @@ def test_run_snapshot_ignores_stale_files(monkeypatch, tmp_path):
     shot.mkdir()
     stale = shot / "zzzz_old.png"  # would win a naive sorted()[-1]
     stale.write_bytes(b"\x89PNG-stale")
+    captured = {}
 
     def _fake_run(cmd, **kw):
-        (shot / "scene00001.png").write_bytes(b"\x89PNG-new")  # VLC's real output
+        captured["prefix"] = next(a.split("=", 1)[1] for a in cmd
+                                  if a.startswith("--scene-prefix="))
+        (shot / f"{captured['prefix']}00001.png").write_bytes(b"\x89PNG-new")  # VLC's real output
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(vlc_backend, "find_vlc", lambda: Path("vlc-stub"))
@@ -261,8 +273,9 @@ def test_run_snapshot_ignores_stale_files(monkeypatch, tmp_path):
     j["inputs"].append("in.mp4")
     j["snapshot"] = {"path": str(shot), "time": 1.0, "ratio": 1}
     result = vlc_backend.run_snapshot(j)
-    assert Path(result["snapshot"]).name == "scene00001.png"
+    assert Path(result["snapshot"]).name == f"{captured['prefix']}00001.png"
     assert result["count"] == 1  # only the file produced by this run
+    assert stale.is_file()  # pre-existing files are left alone
 
 
 def test_run_info_propagates_nonzero_exit(monkeypatch):
@@ -370,3 +383,131 @@ def test_repl_shlex_handles_spaces_and_backslashes():
     lexer.whitespace_split = True
     parts = [t[1:-1] if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'" else t for t in lexer]
     assert parts == ["add-input", r"C:\Users\me\my clip.mp4"]
+
+
+# ── third-round review fixes ────────────────────────────────────────────
+
+def test_load_job_rejects_schema_invalid_types(tmp_path):
+    # Third-round fix: valid JSON with the wrong *shape* must fail at load time
+    # instead of exploding later inside a mutator.
+    p = tmp_path / "bad.json"
+    p.write_text(json.dumps({"software": "vlc", "inputs": ["a.mp4"], "output": []}),
+                 encoding="utf-8")
+    with pytest.raises(ValueError, match="output"):
+        proj.load_job(p)
+
+
+def test_load_job_rejects_non_string_inputs(tmp_path):
+    p = tmp_path / "bad.json"
+    p.write_text(json.dumps({"software": "vlc", "inputs": [1, 2]}), encoding="utf-8")
+    with pytest.raises(ValueError, match="inputs"):
+        proj.load_job(p)
+
+
+def test_cli_mutation_schema_invalid_project_is_structured(tmp_path):
+    # Third-round fix: a project that loads but is schema-invalid must produce a
+    # structured --json error, not an AttributeError traceback with an empty stdout.
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"software": "vlc", "output": []}), encoding="utf-8")
+    media_file = tmp_path / "in.mp4"
+    media_file.write_text("x", encoding="utf-8")
+    runner = CliRunner()
+    r = runner.invoke(vlc_cli.cli, ["--json", "--project", str(bad),
+                                    "set-output", str(tmp_path / "o.mp4")])
+    assert r.exit_code == 1
+    payload = json.loads(r.output)
+    assert payload.get("error")
+    assert "output" in payload.get("detail", "").lower()
+
+
+def test_repl_new_detaches_opened_project(tmp_path, monkeypatch):
+    # Third-round fix: `new` starts an in-memory job, so a later mutation must not
+    # silently overwrite the project file that was opened.
+    job = tmp_path / "job.json"
+    proj.save_job(proj.new_job(), job)
+    before = job.read_text(encoding="utf-8")
+
+    script = [f"open {job}", "new", f"set-output {tmp_path / 'other.mp4'}", "quit"]
+
+    class _FakeSkin:
+        def __init__(self, *a, **k):
+            pass
+
+        def print_banner(self):
+            pass
+
+        def create_prompt_session(self):
+            return object()
+
+        def get_input(self, pt, project_name=None, modified=False):
+            return script.pop(0) if script else "quit"
+
+        def success(self, *a, **k):
+            pass
+
+        def error(self, *a, **k):
+            pass
+
+        def info(self, *a, **k):
+            pass
+
+        def status_block(self, *a, **k):
+            pass
+
+        def help(self, *a, **k):
+            pass
+
+        def print_goodbye(self):
+            pass
+
+    monkeypatch.setattr(vlc_cli, "ReplSkin", _FakeSkin)
+    vlc_cli._repl(None)
+    assert job.read_text(encoding="utf-8") == before
+
+
+def test_run_transcode_removes_temp_when_subprocess_raises(monkeypatch, tmp_path):
+    # Third-round fix: a subprocess timeout must not leave a partial `.vlc-tc-*`
+    # sibling beside the destination.
+    monkeypatch.setattr(vlc_backend, "find_vlc", lambda: Path("vlc-stub"))
+
+    def _fake_run(cmd, **kw):
+        chain = cmd[cmd.index("--sout") + 1]
+        dst = chain.split("dst='")[1].split("'")[0]
+        Path(dst).write_bytes(b"partial-output")  # VLC got this far before hanging
+        raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+
+    monkeypatch.setattr(vlc_backend.subprocess, "run", _fake_run)
+
+    j = proj.new_job()
+    j["inputs"].append("in.mp4")
+    j["output"] = {"path": str(tmp_path / "out.mp4"), "format": "mp4"}
+    with pytest.raises(subprocess.TimeoutExpired):
+        vlc_backend.run_transcode(j)
+    assert list(tmp_path.glob(".vlc-tc-*")) == []
+    assert not (tmp_path / "out.mp4").exists()
+
+
+def test_run_snapshot_rerun_same_directory_succeeds(monkeypatch, tmp_path):
+    # Third-round fix: re-running in the same directory must not be misreported as a
+    # failure just because VLC would reuse the previous run's scene filename.
+    shot = tmp_path / "shots"
+    shot.mkdir()
+    prefixes = []
+
+    def _fake_run(cmd, **kw):
+        prefix = next(a.split("=", 1)[1] for a in cmd if a.startswith("--scene-prefix="))
+        prefixes.append(prefix)
+        (shot / f"{prefix}00001.png").write_bytes(b"\x89PNG")  # VLC's real naming
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(vlc_backend, "find_vlc", lambda: Path("vlc-stub"))
+    monkeypatch.setattr(vlc_backend.subprocess, "run", _fake_run)
+
+    j = proj.new_job()
+    j["inputs"].append("in.mp4")
+    j["snapshot"] = {"path": str(shot), "time": 1.0, "ratio": 1}
+    first = vlc_backend.run_snapshot(j)
+    second = vlc_backend.run_snapshot(j)  # same directory, second invocation
+    assert first["count"] == 1 and second["count"] == 1
+    assert Path(first["snapshot"]) != Path(second["snapshot"])
+    assert prefixes[0] != prefixes[1]

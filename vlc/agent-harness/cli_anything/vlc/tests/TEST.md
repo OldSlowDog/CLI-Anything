@@ -11,11 +11,21 @@
 
 ### Unit Test Plan (`test_core.py`)
 
-- `TestProjectModel` — `new_job` defaults, save/load round-trip, `validate_job` rules
+- `TestProjectModel` — `new_job` defaults, save/load round-trip, `validate_job` rules,
+  schema (field-type) rejection at load time
 - `TestSession` — undo/redo restores snapshots, history labels
-- `TestTranscodeBuilder` — `--sout` chain construction (transcode + stream + snapshot), Windows path normalization
+- `TestTranscodeBuilder` — `--sout` chain construction (transcode + stream + snapshot),
+  Windows path normalization, scene-prefix override
 - `TestMediaParser` — best-effort stats parsing from synthetic VLC log
-- `TestCliWiring` — `--version`/`--help`, `project new`, `add-input`, `set-option` persistence, `set-output`/`set-stream`, `transcode` requires `--project`, `doctor` without VLC
+- `TestCliWiring` — `--version`/`--help`, `project new`, `add-input`, `set-option`
+  persistence, `set-output`/`set-stream`, `transcode` requires `--project`, `doctor`
+  without VLC, structured `--json` errors for missing / malformed / schema-invalid projects
+- `TestBackendSafety` — stream timeout scaling with `--run-time`, persistent stream when
+  run-time is omitted, snapshot isolation from stale files and across re-runs, temp-file
+  cleanup on subprocess failure, `run_info` propagating a nonzero exit, `VLC_BINARY`
+  validation, registry de-duplication
+- `TestRepl` — `new` detaching an opened project, shell-like tokenising of quoted
+  Windows paths
 
 ### E2E Test Plan (`test_full_e2e.py`)
 
@@ -36,7 +46,7 @@ E2E paths run without ffmpeg.
 
 ```
 platform win32 -- Python 3.14.3, pytest-9.1.1
-collected 15 items
+collected 34 items
 
 test_new_job_defaults PASSED
 test_save_and_load_roundtrip PASSED
@@ -47,17 +57,49 @@ test_build_transcode_sout_basic PASSED
 test_build_transcode_sout_windows_path_normalized PASSED
 test_build_stream_sout_rtp PASSED
 test_build_snapshot_args PASSED
+test_build_snapshot_args_scene_prefix PASSED
 test_parse_vlc_stats_synthetic PASSED
 test_cli_version_and_help PASSED
 test_cli_project_new_and_mutate PASSED
 test_cli_set_output_and_stream PASSED
 test_cli_transcode_requires_project PASSED
 test_cli_doctor_without_vlc PASSED
+test_cli_transcode_missing_project_is_structured_json PASSED
+test_transcode_copy_and_none_codecs_omitted PASSED
+test_run_stream_timeout_scales_with_run_time PASSED
+test_run_snapshot_ignores_stale_files PASSED
+test_run_info_propagates_nonzero_exit PASSED
+test_registry_names_not_in_both_files PASSED
+test_transcode_rejects_output_equal_to_input PASSED
+test_run_stream_persistent_omits_run_time PASSED
+test_find_vlc_rejects_directory_binary PASSED
+test_find_vlc_rejects_non_executable_file PASSED
+test_cli_mutation_malformed_project_structured PASSED
+test_repl_shlex_handles_spaces_and_backslashes PASSED
+test_load_job_rejects_schema_invalid_types PASSED
+test_load_job_rejects_non_string_inputs PASSED
+test_cli_mutation_schema_invalid_project_is_structured PASSED
+test_repl_new_detaches_opened_project PASSED
+test_run_transcode_removes_temp_when_subprocess_raises PASSED
+test_run_snapshot_rerun_same_directory_succeeds PASSED
 
-============================= 15 passed in 0.22s =============================
+============================= 33 passed, 1 skipped in 0.80s =============================
 ```
 
-**Summary:** 15 passed, 0 failed. No external dependency (VLC / ffmpeg) required.
+**Summary:** 33 passed, 1 skipped (`test_find_vlc_rejects_non_executable_file` — the
+exec-bit check is POSIX-only). No external dependency (VLC / ffmpeg) required.
+
+#### Regression-proofing of the review fixes
+
+Every review finding ships with a test that was verified to **fail against the pre-fix
+code** (the fixed sources were reverted and the new tests re-run), so none of them is a
+test that would pass either way:
+
+| Round | Findings | Regression tests |
+|---|---|---|
+| 1st (`8d1a22a`) | 9 | codec `None` omission, stream timeout scaling, snapshot stale-file isolation, `run_info` exit propagation, structured project errors, registry de-duplication, SKILL.md option order |
+| 2nd (`cb6fe9e`) | 7 | output aliases input, stale destination rejected, persistent stream, guarded malformed projects, REPL `shlex`, `VLC_BINARY` validation, `.gitignore` scoping |
+| 3rd (`7d5c4e1`) | 4 | `new` detaches an opened project, schema-invalid projects rejected at load *and* inside the guard, temp-file cleanup on subprocess failure, per-run snapshot prefix |
 
 ### E2E — `pytest cli_anything/vlc/tests/test_full_e2e.py -v` (real VLC 3.0.21)
 
