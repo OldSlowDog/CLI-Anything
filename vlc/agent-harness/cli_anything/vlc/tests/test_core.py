@@ -1035,7 +1035,10 @@ def test_documented_doctor_shape_matches_reality():
 
     runner = CliRunner()
     result = runner.invoke(vlc_cli.cli, ["--json", "doctor"])
-    assert result.exit_code == 1  # no VLC in this environment -> ready:false
+    # The shape must hold whether or not VLC is installed here: exit 0 when it is,
+    # 1 when it is not. Asserting a specific code made this test fail on any machine
+    # that actually has VLC — i.e. on the maintainer's.
+    assert result.exit_code in (0, 1)
     actual = set(json.loads(result.output))
     assert documented == actual, (
         f"doc documents {sorted(documented)} but doctor emits {sorted(actual)}"

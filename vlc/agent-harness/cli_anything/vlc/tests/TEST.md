@@ -167,13 +167,13 @@ test that would pass either way:
 | class sweep | — | Same bug classes as earlier rounds, audited across **every** path rather than the reported one: `stream.dst`/`stream.port` null handling and port coercion, `stream`/`snapshot` sub-field schema validation, and the `doctor` response shape documented in `examples/agent-workflows.md` |
 | 7th (`eea996a`) | 4 | VLC probe fixtures made executable on POSIX, `--version` probe required to exit zero, zero snapshot ratios rejected instead of silently substituted, root `skills/` copy kept in sync with the packaged one |
 | class sweep (2) | — | Same audit applied to the paths the first sweep did not reach: the **REPL** (which validated nothing) and **on-disk atomicity**. `add-input` / `set-output` now validate in the REPL exactly as the Click commands do; `save_job` writes to a temp sibling and renames; `ReplSkin` no longer creates `~/.cli-anything-*` merely by being constructed |
+| proactive | — | every *data-level* `--json` failure emits structured JSON: missing media file (`info` / `add-input`), output path that is a directory (`set-output`), missing `--project` (`project show`) |
 
 > The 6th round went *up* (4 → 6) because two findings were second instances of classes
 > fixed in earlier rounds: the non-finite-number hole had only been closed on the
 > `set-option` path, not `set-snapshot`, and snapshot temp-file cleanup had only been
 > added to `run_transcode`, not `run_snapshot`. Closing a class means auditing *every*
 > path through it, not the one that was reported.
-| proactive | — | every *data-level* `--json` failure emits structured JSON: missing media file (`info` / `add-input`), output path that is a directory (`set-output`), missing `--project` (`project show`) |
 
 > The `nan` / `inf` finding is the important one: `float()` accepts them, and the
 > resulting `NaN` / `Infinity` tokens are **not valid JSON**, so strict agent parsers
@@ -189,16 +189,29 @@ test that would pass either way:
 ### E2E — `pytest cli_anything/vlc/tests/test_full_e2e.py -v` (real VLC 3.0.21)
 
 ```
-platform win32 -- Python 3.14.3, pytest-9.1.1
-collected 4 items
+platform win32 -- Python 3.14.3, pytest-9.1.1, VLC 3.0.21 Vetinari (win64 portable)
+collected 5 items
 
-test_transcode_wav_to_wav PASSED        # real vlc transcode -> output exists, >1KB, 'RIFF' magic
-test_info_wav PASSED                    # real vlc --stats probe, path + returncode
-test_stream_udp PASSED                  # real vlc UDP stream 1s, exit 0
-test_cli_transcode_end_to_end PASSED    # full agent flow via --json
+test_transcode_wav_to_wav PASSED              # real vlc transcode -> output exists, >1KB, 'RIFF' magic
+test_transcode_replaces_stale_output PASSED   # pre-existing destination replaced, never passed off as fresh
+test_info_wav PASSED                          # real vlc --stats probe, playback bounded by --run-time
+test_stream_udp PASSED                        # real vlc UDP stream 1s, exit 0
+test_cli_transcode_end_to_end PASSED          # full agent flow via --json
 
-============================= 4 passed in 6.58s =============================
+============================= 5 passed =============================
 ```
+
+Whole suite against a real VLC: **93 passed, 1 skipped in 8.30s** (88 unit + 5 E2E).
+Without VLC installed, the unit layer alone: **88 passed, 1 skipped in 1.24s**.
+
+The E2E run is also what validates the decisions that cannot be unit-tested:
+
+- `run_info` bounded by `--run-time` returns `--stats` output within the bound (round 4's P1).
+- `find_vlc()`'s `--version` probe accepts a real VLC and `doctor` reports
+  `{"checks": [{"ok": true, "path": ...}], "ready": true}` with exit 0 (rounds 6–7).
+- A real `--sout` chain transcode produces a valid file, and the temp-and-replace path
+  replaces a stale destination rather than reporting it as fresh output.
+
 
 Run locally (VLC on PATH, or `VLC_BINARY` set):
 
