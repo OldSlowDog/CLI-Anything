@@ -803,3 +803,141 @@ def test_build_sout_treats_scalar_extra_as_single_option():
     s = transcode.build_transcode_sout(j)
     assert "soverlay" in s
     assert "s,o,v,e,r,l,a,y" not in s
+
+
+# ── sixth-round review fixes ────────────────────────────────────────────
+
+def test_find_vlc_rejects_runnable_binary_that_is_not_vlc(monkeypatch, tmp_path):
+    # /bin/true is runnable but is not VLC: doctor must not report ready against it.
+    fake = tmp_path / "vlc"
+    fake.write_text("#!/bin/sh\ntrue\n", encoding="utf-8")
+    monkeypatch.setenv("VLC_BINARY", str(fake))
+    monkeypatch.setattr(
+        vlc_backend.subprocess, "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(
+            cmd, 0, stdout="true (GNU coreutils) 9.4", stderr=""))
+    with pytest.raises(RuntimeError, match="does not identify"):
+        vlc_backend.find_vlc()
+
+
+def test_find_vlc_accepts_binary_that_identifies_as_vlc(monkeypatch, tmp_path):
+    fake = tmp_path / "vlc"
+    fake.write_text("stub", encoding="utf-8")
+    monkeypatch.setenv("VLC_BINARY", str(fake))
+    monkeypatch.setattr(
+        vlc_backend.subprocess, "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(
+            cmd, 0, stdout="VLC media player 3.0.21 Vetinari", stderr=""))
+    assert vlc_backend.find_vlc() == fake
+
+
+def test_find_vlc_probe_failure_is_rejected(monkeypatch, tmp_path):
+    # A candidate whose --version probe cannot even run must not be accepted.
+    fake = tmp_path / "vlc"
+    fake.write_text("stub", encoding="utf-8")
+    monkeypatch.setenv("VLC_BINARY", str(fake))
+
+    def _boom(cmd, **kw):
+        raise OSError("cannot execute")
+
+    monkeypatch.setattr(vlc_backend.subprocess, "run", _boom)
+    with pytest.raises(RuntimeError):
+        vlc_backend.find_vlc()
+
+
+def test_build_sout_null_output_format_uses_mp4_default():
+    j = proj.new_job()
+    j["inputs"].append("in.mp4")
+    j["output"] = {"path": "out.mp4", "format": None}
+    s = transcode.build_transcode_sout(j)
+    assert "mux=none" not in s
+    assert "mux=mp4" in s
+
+
+def test_build_stream_sout_null_mux_uses_ts_default():
+    j = proj.new_job()
+    j["inputs"].append("in.mp4")
+    j["stream"] = {"protocol": "rtp", "dst": "127.0.0.1", "port": 5004, "mux": None}
+    s = transcode.build_stream_sout(j)
+    assert "mux=none" not in s
+    assert "mux=ts" in s
+
+
+def test_build_snapshot_args_defaults_missing_time():
+    # A loaded snapshot may omit `time`; without a seek + run-time bound the scene
+    # filter would capture frames all the way to EOF.
+    j = proj.new_job()
+    j["snapshot"] = {"path": "/tmp/shots", "ratio": 1}
+    args = transcode.build_snapshot_args(j)
+    assert any(a.startswith("--start-time=") for a in args)
+    assert any(a.startswith("--run-time=") for a in args)
+
+
+def test_build_snapshot_args_tolerates_null_time_and_ratio():
+    j = proj.new_job()
+    j["snapshot"] = {"path": "/tmp/shots", "time": None, "ratio": None}
+    args = transcode.build_snapshot_args(j)  # int(None) used to raise TypeError
+    assert "--scene-ratio=1" in args
+    assert "--start-time=1.0" in args
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "1e309"])
+def test_set_snapshot_rejects_non_finite_time(tmp_path, bad):
+    job = tmp_path / "job.json"
+    proj.save_job(proj.new_job(), job)
+    before = job.read_text(encoding="utf-8")
+    runner = CliRunner()
+    r = runner.invoke(vlc_cli.cli, ["--json", "--project", str(job), "set-snapshot",
+                                    "--path", str(tmp_path), "--time", bad])
+    assert r.exit_code == 1
+    payload = json.loads(r.output)
+    assert payload.get("error")
+    assert "finite" in payload.get("detail", "").lower()
+    assert job.read_text(encoding="utf-8") == before
+
+
+def test_run_snapshot_cleans_up_when_vlc_fails(monkeypatch, tmp_path):
+    # Frames already written when VLC fails must not be left in the output directory.
+    shot = tmp_path / "shots"
+    shot.mkdir()
+    written = []
+
+    def _fake_run(cmd, **kw):
+        prefix = next(a.split("=", 1)[1] for a in cmd if a.startswith("--scene-prefix="))
+        p = shot / f"{prefix}00001.png"
+        p.write_bytes(b"\x89PNG-partial")
+        written.append(p)
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom")
+
+    monkeypatch.setattr(vlc_backend, "find_vlc", lambda: Path("vlc-stub"))
+    monkeypatch.setattr(vlc_backend.subprocess, "run", _fake_run)
+
+    j = proj.new_job()
+    j["inputs"].append("in.mp4")
+    j["snapshot"] = {"path": str(shot), "time": 1.0, "ratio": 1}
+    with pytest.raises(RuntimeError):
+        vlc_backend.run_snapshot(j)
+    assert list(shot.glob("*.png")) == []
+    assert all(not p.exists() for p in written)
+
+
+def test_readme_command_table_matches_the_cli():
+    # The documented command groups must not advertise commands that do not exist.
+    readme = (Path(__file__).resolve().parents[5] / "vlc" / "agent-harness"
+              / "cli_anything" / "vlc" / "README.md")
+    if not readme.is_file():
+        pytest.skip("README not present")
+    text = readme.read_text(encoding="utf-8")
+    runner = CliRunner()
+    root = runner.invoke(vlc_cli.cli, ["--help"]).output
+    group = runner.invoke(vlc_cli.cli, ["project", "--help"]).output
+
+    # Every command named in the table must exist on the matching surface.
+    assert "project open" not in text.replace("`", "")
+    for name in ("new", "show"):
+        assert name in group, f"`project {name}` is documented but missing"
+    for name in ("add-input", "set-output", "set-option", "set-stream", "set-snapshot",
+                 "clear", "transcode", "stream", "snapshot", "info", "doctor"):
+        assert name in root, f"`{name}` is documented but missing"
+    # undo/redo are REPL-only, so the table must say so rather than list them as commands.
+    assert "REPL only" in text

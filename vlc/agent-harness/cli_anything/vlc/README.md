@@ -45,10 +45,14 @@ cli-anything-vlc info in.mp4 --json
 
 | Group | Commands |
 |---|---|
-| `project` | `new`, `open`, `info`, `save` |
+| `project` | `new`, `show` |
 | job mutation | `add-input`, `set-output`, `set-option`, `set-stream`, `set-snapshot`, `clear` |
-| run | `transcode`, `stream`, `snapshot`, `info` |
-| session | `undo`, `redo` |
+| run / inspect | `transcode`, `stream`, `snapshot`, `info`, `doctor` |
+| REPL only | `open`, `save`, `undo`, `redo` |
+
+> `open`, `save`, `undo` and `redo` exist **only inside the REPL** (run the CLI with no
+> subcommand). The root command exposes `--json`, `--project`, `--version` and `--help`;
+> the mutation and run commands above are available both as subcommands and in the REPL.
 
 ## For AI agents
 

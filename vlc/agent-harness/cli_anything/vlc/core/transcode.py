@@ -163,7 +163,9 @@ def build_transcode_sout(job: Dict[str, Any]) -> str:
     """
     out = job.get("output", {}) or {}
     dst = (out.get("path") or "").replace("\\", "/")
-    mux = resolve_mux(out.get("format", "mp4"))
+    # `get("format", "mp4")` returns None when the key is present but null, which
+    # resolved to the literal mux `none` instead of the MP4 default.
+    mux = resolve_mux(out.get("format") or "mp4")
     std = f"std{{access=file,mux={mux},dst='{dst}'}}"
     return f"#{_transcode_block(job)}:{std}"
 
@@ -174,7 +176,7 @@ def build_stream_sout(job: Dict[str, Any]) -> str:
     proto = (s.get("protocol") or "rtp").lower()
     dst = s.get("dst", "127.0.0.1")
     port = int(s.get("port", 1234))
-    mux = resolve_mux(s.get("mux", "ts"))
+    mux = resolve_mux(s.get("mux") or "ts")  # null mux -> "none" via get()'s default
 
     if proto == "rtp":
         dest = f"rtp{{dst={dst},port={port},mux={mux}}}"
@@ -198,7 +200,7 @@ def build_snapshot_args(job: Dict[str, Any], scene_prefix: Optional[str] = None)
     """
     snap = job.get("snapshot") or {}
     path = (snap.get("path") or "").replace("\\", "/")
-    ratio = int(snap.get("ratio", 1))
+    ratio = int(snap.get("ratio") or 1)
     prefix = scene_prefix if scene_prefix is not None else (snap.get("prefix") or "scene")
     args = [
         "--video-filter=scene",
@@ -209,8 +211,11 @@ def build_snapshot_args(job: Dict[str, Any], scene_prefix: Optional[str] = None)
         "--no-audio",
         "--play-and-exit",
     ]
-    if snap.get("time") is not None:
-        # Seek to the requested time, then run a tiny window so only ~1 frame is captured.
-        args.append(f"--start-time={float(snap['time'])}")
-        args.append("--run-time=0.1")
+    # A loaded snapshot may omit `time` entirely. Without both a seek and a run-time
+    # bound the scene filter captures frames all the way to EOF (or the backend
+    # timeout) instead of a single still, so normalise to the CLI's 1-second default.
+    seek = snap.get("time")
+    seek = 1.0 if seek is None else float(seek)
+    args.append(f"--start-time={seek}")
+    args.append("--run-time=0.1")
     return args

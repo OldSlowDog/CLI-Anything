@@ -27,6 +27,22 @@ from ..core.media import parse_vlc_stats
 _INFO_PROBE_SECONDS = 2
 
 
+def _identifies_as_vlc(binary: Path) -> bool:
+    """Ask the candidate for its version and require it to name VLC.
+
+    Scoped to an explicit ``VLC_BINARY``: a PATH entry literally called ``vlc`` needs no
+    such probe, and putting one on the hot path of every media command would add a
+    subprocess to each run for no gain.
+    """
+    try:
+        result = subprocess.run([str(binary), "--version"], capture_output=True,
+                                text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    combined = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
+    return "vlc" in combined
+
+
 def find_vlc() -> Path:
     """Locate the VLC binary.
 
@@ -38,6 +54,14 @@ def find_vlc() -> Path:
     if env:
         p = Path(env)
         if p.is_file() and (os.name != "posix" or os.access(p, os.X_OK)):
+            # Runnable is not the same as being VLC: /bin/true used to satisfy this
+            # branch, so `doctor` reported ready on a machine with no VLC at all.
+            if not _identifies_as_vlc(p):
+                raise RuntimeError(
+                    f"VLC_BINARY is set to '{env}', which runs but does not identify as "
+                    "VLC. Unset VLC_BINARY to search PATH, or point it at the real "
+                    "vlc/vlc.exe executable."
+                )
             return p
         # An explicit VLC_BINARY that points nowhere runnable must fail loudly so
         # `doctor` does not report ready against something unusable.
@@ -177,12 +201,20 @@ def run_snapshot(job: Dict[str, Any], timeout: int = 120) -> Dict[str, Any]:
     prefix = f"vlc-snap-{os.getpid()}-{uuid.uuid4().hex[:8]}-"
     args = build_snapshot_args(job, scene_prefix=prefix)
     cmd: List[str] = [str(vlc), "-I", "dummy", "--play-and-exit", *args, str(inputs[0])]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    if result.returncode != 0:
-        raise RuntimeError(f"vlc exited {result.returncode}: {result.stderr[-800:]}")
-    produced = sorted(scene_dir.glob(f"{prefix}*.png"))
-    if not produced:
-        raise RuntimeError(f"VLC produced no new snapshot in {out_dir}\n{result.stderr[-800:]}")
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if result.returncode != 0:
+            raise RuntimeError(f"vlc exited {result.returncode}: {result.stderr[-800:]}")
+        produced = sorted(scene_dir.glob(f"{prefix}*.png"))
+        if not produced:
+            raise RuntimeError(f"VLC produced no new snapshot in {out_dir}\n{result.stderr[-800:]}")
+    except Exception:
+        # VLC can have written frames already when it fails or times out; those partial
+        # PNGs would otherwise accumulate on every unsuccessful invocation, which adds
+        # up fast for low-ratio jobs.
+        for stray in scene_dir.glob(f"{prefix}*.png"):
+            stray.unlink(missing_ok=True)
+        raise
     # Most recent file this run produced (robust against naming/sort quirks).
     last = max(produced, key=lambda p: p.stat().st_mtime)
     return {

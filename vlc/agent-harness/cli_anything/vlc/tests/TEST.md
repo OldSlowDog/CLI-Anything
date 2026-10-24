@@ -52,7 +52,7 @@ E2E paths run without ffmpeg.
 
 ```
 platform win32 -- Python 3.14.3, pytest-9.1.1
-collected 55 items
+collected 67 items
 
 test_new_job_defaults PASSED
 test_save_and_load_roundtrip PASSED
@@ -109,11 +109,23 @@ test_load_job_rejects_boolean_transcode_value PASSED
 test_load_job_rejects_scalar_extra PASSED
 test_load_job_rejects_non_string_extra_items PASSED
 test_build_sout_treats_scalar_extra_as_single_option PASSED
+test_find_vlc_rejects_runnable_binary_that_is_not_vlc PASSED
+test_find_vlc_accepts_binary_that_identifies_as_vlc PASSED
+test_find_vlc_probe_failure_is_rejected PASSED
+test_build_sout_null_output_format_uses_mp4_default PASSED
+test_build_stream_sout_null_mux_uses_ts_default PASSED
+test_build_snapshot_args_defaults_missing_time PASSED
+test_build_snapshot_args_tolerates_null_time_and_ratio PASSED
+test_set_snapshot_rejects_non_finite_time[nan] PASSED
+test_set_snapshot_rejects_non_finite_time[inf] PASSED
+test_set_snapshot_rejects_non_finite_time[1e309] PASSED
+test_run_snapshot_cleans_up_when_vlc_fails PASSED
+test_readme_command_table_matches_the_cli PASSED
 
-============================= 54 passed, 1 skipped in 0.94s =============================
+============================= 66 passed, 1 skipped in 0.92s =============================
 ```
 
-**Summary:** 54 passed, 1 skipped (`test_find_vlc_rejects_non_executable_file` — the
+**Summary:** 66 passed, 1 skipped (`test_find_vlc_rejects_non_executable_file` — the
 exec-bit check is POSIX-only). No external dependency (VLC / ffmpeg) required.
 
 #### Regression-proofing of the review fixes
@@ -129,6 +141,13 @@ test that would pass either way:
 | 3rd (`7d5c4e1`) | 4 | `new` detaches an opened project, schema-invalid projects rejected at load *and* inside the guard, temp-file cleanup on subprocess failure, per-run snapshot prefix |
 | 4th (`77f42fc`) | 4 | `info` playback bounded independently of media length, explicit-null containers normalised at load, REPL binds a not-yet-existing `--project`, unknown `set-option` keys rejected |
 | 5th (`f58b8f8`) | 4 | `project new` write failures guarded, directory inputs routed through the callback, non-finite numeric options rejected, `transcode.extra` validated as `list[str]` |
+| 6th (`9013821`) | 6 | `VLC_BINARY` probed before `doctor` reports ready, null output format/mux defaulted, missing snapshot `time` defaulted, non-finite snapshot times rejected, partial snapshots cleaned up on failure, README command table corrected |
+
+> The 6th round went *up* (4 → 6) because two findings were second instances of classes
+> fixed in earlier rounds: the non-finite-number hole had only been closed on the
+> `set-option` path, not `set-snapshot`, and snapshot temp-file cleanup had only been
+> added to `run_transcode`, not `run_snapshot`. Closing a class means auditing *every*
+> path through it, not the one that was reported.
 | proactive | — | every *data-level* `--json` failure emits structured JSON: missing media file (`info` / `add-input`), output path that is a directory (`set-output`), missing `--project` (`project show`) |
 
 > The `nan` / `inf` finding is the important one: `float()` accepts them, and the

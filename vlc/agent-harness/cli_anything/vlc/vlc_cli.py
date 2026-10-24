@@ -266,6 +266,12 @@ def set_stream(ctx: click.Context, protocol: str, dst: str, port: int, mux: str)
 @click.pass_context
 def set_snapshot(ctx: click.Context, snap_dir: Path, time: float, ratio: int) -> None:
     """Configure still-frame extraction for the job."""
+    json_mode, _ = _ctx_state(ctx)
+    # Click's type=float accepts nan/inf, which would persist the NaN/Infinity tokens —
+    # not valid JSON, so neither the --json response nor the saved project could be
+    # parsed by a strict caller.
+    if not math.isfinite(time):
+        _fail(json_mode, f"snapshot --time expects a finite number of seconds, got '{time}'")
     _apply(ctx, f"set-snapshot {snap_dir}",
            lambda j: j.__setitem__("snapshot",
                                     {"path": str(snap_dir), "time": time, "ratio": ratio}))
@@ -467,10 +473,14 @@ def _repl(project: Optional[Path] = None) -> None:
                                     {"protocol": proto, "dst": dst, "port": int(port), "mux": mux}))
                 _persist(); skin.success("stream configured")
             elif cmd == "set-snapshot":
+                seek = float(args[1]) if len(args) > 1 else 1.0
+                if not math.isfinite(seek):
+                    skin.error(f"set-snapshot: time expects a finite number, got '{seek}'")
+                    continue
                 session.mutate(f"set-snapshot {args[0]}",
                                lambda j: j.__setitem__("snapshot",
                                     {"path": str(Path(args[0])),
-                                     "time": float(args[1]) if len(args) > 1 else 1.0, "ratio": 1}))
+                                     "time": seek, "ratio": 1}))
                 _persist(); skin.success("snapshot configured")
             elif cmd == "clear":
                 session.mutate("clear", lambda j: j.clear() or j.update(proj.new_job()))
