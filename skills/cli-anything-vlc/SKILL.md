@@ -38,7 +38,7 @@ cli-anything-vlc
 
 # Create a job spec and inspect it
 cli-anything-vlc project new -o job.json
-cli-anything-vlc --json project show --project job.json
+cli-anything-vlc --project job.json --json project show
 ```
 
 ## Command Groups

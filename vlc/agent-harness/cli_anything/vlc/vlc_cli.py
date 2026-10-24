@@ -272,6 +272,10 @@ def set_snapshot(ctx: click.Context, snap_dir: Path, time: float, ratio: int) ->
     # parsed by a strict caller.
     if not math.isfinite(time):
         _fail(json_mode, f"snapshot --time expects a finite number of seconds, got '{time}'")
+    if ratio < 1:
+        # Persisting 0 and substituting 1 at build time made the run disagree with the
+        # saved spec, so reject it here rather than quietly capturing every frame.
+        _fail(json_mode, f"snapshot --ratio must be >= 1, got {ratio}")
     _apply(ctx, f"set-snapshot {snap_dir}",
            lambda j: j.__setitem__("snapshot",
                                     {"path": str(snap_dir), "time": time, "ratio": ratio}))

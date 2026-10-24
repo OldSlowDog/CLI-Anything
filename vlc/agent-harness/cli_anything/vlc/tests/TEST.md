@@ -52,7 +52,7 @@ E2E paths run without ffmpeg.
 
 ```
 platform win32 -- Python 3.14.3, pytest-9.1.1
-collected 78 items
+collected 83 items
 
 test_new_job_defaults PASSED
 test_save_and_load_roundtrip PASSED
@@ -132,11 +132,16 @@ test_load_job_rejects_invalid_stream_fields PASSED
 test_load_job_accepts_valid_stream PASSED
 test_load_job_rejects_invalid_snapshot_fields PASSED
 test_documented_doctor_shape_matches_reality PASSED
+test_find_vlc_rejects_probe_that_exits_nonzero PASSED
+test_set_snapshot_rejects_zero_ratio PASSED
+test_build_snapshot_args_rejects_zero_ratio PASSED
+test_build_snapshot_args_rejects_non_integer_ratio PASSED
+test_skill_copies_stay_in_sync PASSED
 
-============================= 77 passed, 1 skipped in 1.10s =============================
+============================= 82 passed, 1 skipped in 1.52s =============================
 ```
 
-**Summary:** 77 passed, 1 skipped (`test_find_vlc_rejects_non_executable_file` — the
+**Summary:** 82 passed, 1 skipped (`test_find_vlc_rejects_non_executable_file` — the
 exec-bit check is POSIX-only). No external dependency (VLC / ffmpeg) required.
 
 #### Regression-proofing of the review fixes
@@ -154,6 +159,7 @@ test that would pass either way:
 | 5th (`f58b8f8`) | 4 | `project new` write failures guarded, directory inputs routed through the callback, non-finite numeric options rejected, `transcode.extra` validated as `list[str]` |
 | 6th (`9013821`) | 6 | `VLC_BINARY` probed before `doctor` reports ready, null output format/mux defaulted, missing snapshot `time` defaulted, non-finite snapshot times rejected, partial snapshots cleaned up on failure, README command table corrected |
 | class sweep | — | Same bug classes as earlier rounds, audited across **every** path rather than the reported one: `stream.dst`/`stream.port` null handling and port coercion, `stream`/`snapshot` sub-field schema validation, and the `doctor` response shape documented in `examples/agent-workflows.md` |
+| 7th (`eea996a`) | 4 | VLC probe fixtures made executable on POSIX, `--version` probe required to exit zero, zero snapshot ratios rejected instead of silently substituted, root `skills/` copy kept in sync with the packaged one |
 
 > The 6th round went *up* (4 → 6) because two findings were second instances of classes
 > fixed in earlier rounds: the non-finite-number hole had only been closed on the

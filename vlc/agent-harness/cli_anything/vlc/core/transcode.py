@@ -223,7 +223,17 @@ def build_snapshot_args(job: Dict[str, Any], scene_prefix: Optional[str] = None)
     """
     snap = job.get("snapshot") or {}
     path = (snap.get("path") or "").replace("\\", "/")
-    ratio = int(snap.get("ratio") or 1)
+    # A zero/negative ratio used to be silently replaced by 1, so the run captured a
+    # different frame cadence than the saved spec asked for; reject it instead.
+    raw_ratio = snap.get("ratio")
+    if raw_ratio is None:
+        raw_ratio = 1
+    try:
+        ratio = int(raw_ratio)
+    except (TypeError, ValueError):
+        raise ValueError(f"snapshot.ratio must be an integer, got {raw_ratio!r}")
+    if ratio < 1:
+        raise ValueError(f"snapshot.ratio must be >= 1, got {ratio}")
     prefix = scene_prefix if scene_prefix is not None else (snap.get("prefix") or "scene")
     args = [
         "--video-filter=scene",

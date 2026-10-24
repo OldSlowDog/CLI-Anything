@@ -39,6 +39,10 @@ def _identifies_as_vlc(binary: Path) -> bool:
                                 text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         return False
+    # A zero status *and* the VLC signature: a binary that prints "VLC" but exits
+    # nonzero is broken, and `doctor` must not call that ready.
+    if result.returncode != 0:
+        return False
     combined = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
     return "vlc" in combined
 

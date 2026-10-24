@@ -812,6 +812,7 @@ def test_find_vlc_rejects_runnable_binary_that_is_not_vlc(monkeypatch, tmp_path)
     # /bin/true is runnable but is not VLC: doctor must not report ready against it.
     fake = tmp_path / "vlc"
     fake.write_text("#!/bin/sh\ntrue\n", encoding="utf-8")
+    fake.chmod(0o755)  # POSIX: without the exec bit find_vlc() rejects before the probe
     monkeypatch.setenv("VLC_BINARY", str(fake))
     monkeypatch.setattr(
         vlc_backend.subprocess, "run",
@@ -824,6 +825,7 @@ def test_find_vlc_rejects_runnable_binary_that_is_not_vlc(monkeypatch, tmp_path)
 def test_find_vlc_accepts_binary_that_identifies_as_vlc(monkeypatch, tmp_path):
     fake = tmp_path / "vlc"
     fake.write_text("stub", encoding="utf-8")
+    fake.chmod(0o755)  # POSIX: without the exec bit find_vlc() rejects before the probe
     monkeypatch.setenv("VLC_BINARY", str(fake))
     monkeypatch.setattr(
         vlc_backend.subprocess, "run",
@@ -836,6 +838,7 @@ def test_find_vlc_probe_failure_is_rejected(monkeypatch, tmp_path):
     # A candidate whose --version probe cannot even run must not be accepted.
     fake = tmp_path / "vlc"
     fake.write_text("stub", encoding="utf-8")
+    fake.chmod(0o755)  # POSIX: without the exec bit find_vlc() rejects before the probe
     monkeypatch.setenv("VLC_BINARY", str(fake))
 
     def _boom(cmd, **kw):
@@ -1038,3 +1041,70 @@ def test_documented_doctor_shape_matches_reality():
     )
     # the failure example must describe the same shape
     assert '"checks"' in text and '"ready"' in text
+
+
+# ── seventh-round review fixes ──────────────────────────────────────────
+
+def test_find_vlc_rejects_probe_that_exits_nonzero(monkeypatch, tmp_path):
+    # Printing "VLC" is not enough: a nonzero --version status means the binary is
+    # broken, and doctor must not report ready against it.
+    fake = tmp_path / "vlc"
+    fake.write_text("stub", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("VLC_BINARY", str(fake))
+    monkeypatch.setattr(
+        vlc_backend.subprocess, "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(
+            cmd, 3, stdout="VLC media player 3.0.21", stderr="fatal: no plugins"))
+    with pytest.raises(RuntimeError, match="does not identify"):
+        vlc_backend.find_vlc()
+
+
+def test_set_snapshot_rejects_zero_ratio(tmp_path):
+    # A zero ratio used to be persisted and then silently replaced by 1 at build time,
+    # so the run captured a different cadence than the saved spec.
+    job = tmp_path / "job.json"
+    proj.save_job(proj.new_job(), job)
+    before = job.read_text(encoding="utf-8")
+    runner = CliRunner()
+    r = runner.invoke(vlc_cli.cli, ["--json", "--project", str(job), "set-snapshot",
+                                    "--path", str(tmp_path), "--ratio", "0"])
+    assert r.exit_code == 1
+    payload = json.loads(r.output)
+    assert payload.get("error")
+    assert "ratio" in payload.get("detail", "").lower()
+    assert job.read_text(encoding="utf-8") == before
+
+
+def test_build_snapshot_args_rejects_zero_ratio():
+    j = proj.new_job()
+    j["snapshot"] = {"path": "/tmp/shots", "time": 1.0, "ratio": 0}
+    with pytest.raises(ValueError, match="ratio"):
+        transcode.build_snapshot_args(j)
+
+
+def test_build_snapshot_args_rejects_non_integer_ratio():
+    j = proj.new_job()
+    j["snapshot"] = {"path": "/tmp/shots", "time": 1.0, "ratio": "every"}
+    with pytest.raises(ValueError, match="ratio"):
+        transcode.build_snapshot_args(j)
+
+
+def test_skill_copies_stay_in_sync():
+    # registry.json points agents at the root copy, so the two must not diverge — and
+    # neither may place root options after the subcommand they belong to.
+    root_dir = Path(__file__).resolve().parents[5]
+    root = root_dir / "skills" / "cli-anything-vlc" / "SKILL.md"
+    packaged = (root_dir / "vlc" / "agent-harness" / "cli_anything" / "vlc"
+                / "skills" / "SKILL.md")
+    if not (root.is_file() and packaged.is_file()):
+        pytest.skip("skill copies not present")
+
+    assert root.read_text(encoding="utf-8") == packaged.read_text(encoding="utf-8"), (
+        "the registry-facing root SKILL.md and the packaged copy have diverged"
+    )
+    for line in root.read_text(encoding="utf-8").splitlines():
+        if "project show" not in line or not line.strip().startswith("cli-anything-vlc"):
+            continue
+        assert line.index("--project") < line.index("project show"), line
+        assert line.index("--json") < line.index("project show"), line
