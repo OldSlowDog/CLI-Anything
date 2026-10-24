@@ -147,7 +147,12 @@ def _transcode_block(job: Dict[str, Any]) -> str:
         params.append(f"channels={int(t['channels'])}")
     if t.get("samplerate"):
         params.append(f"samplerate={int(t['samplerate'])}")
-    params.extend(t.get("extra") or [])
+    # A lone scalar `extra` is one option, not one character per option: `extend` on a
+    # string would splice "soverlay" into the chain as s,o,v,e,r,l,a,y.
+    extra = t.get("extra")
+    if isinstance(extra, str):
+        extra = [extra]
+    params.extend(str(item) for item in (extra or []))
     return "transcode{" + ",".join(params) + "}"
 
 

@@ -10,6 +10,7 @@ VLC's ``--sout`` engine. Supports a stateful REPL with undo/redo and scripted
 from __future__ import annotations
 
 import json
+import math
 import shlex
 import sys
 from pathlib import Path
@@ -139,8 +140,13 @@ def project() -> None:
 def project_new(ctx: click.Context, output: Path) -> None:
     """Create a new empty job spec file."""
     json_mode, _ = _ctx_state(ctx)
-    meta = proj.save_job(proj.new_job(), output)
-    _emit({"created": str(output), "size_bytes": meta["size_bytes"]}, json_mode)
+    try:
+        meta = proj.save_job(proj.new_job(), output)
+        payload = {"created": str(output), "size_bytes": meta["size_bytes"]}
+    except Exception as e:  # noqa: BLE001 — unwritable target -> structured error
+        _fail(json_mode, str(e), type(e))
+        return  # _fail exits; kept explicit so the happy path stays readable
+    _emit(payload, json_mode)
 
 
 @project.command("show")
@@ -172,13 +178,28 @@ NUMERIC_OPTION_KEYS = frozenset(
 )
 
 
+def _coerce_number(key: str, value: str) -> Optional[float]:
+    """Parse a numeric transcode option, or return None when it is not finite.
+
+    ``float()`` happily accepts ``nan`` / ``inf`` / ``1e309``. Those used to be
+    persisted and echoed as the ``NaN`` / ``Infinity`` tokens, which are **not valid
+    JSON**, so strict agent parsers could consume neither the ``--json`` response nor
+    the saved project file.
+    """
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    return num if math.isfinite(num) else None
+
+
 @cli.command("add-input")
-@click.argument("file", type=click.Path(dir_okay=False, path_type=Path))
+@click.argument("file", type=click.Path(path_type=Path))
 @click.pass_context
 def add_input(ctx: click.Context, file: Path) -> None:
     """Append an input media file to the job."""
-    # Validated here rather than by click.Path(exists=True): Click's own check exits 2
-    # with human-only text, which breaks the --json structured-error contract.
+    # Validated here rather than by click.Path(exists=True, dir_okay=False): Click's
+    # own checks exit 2 with human-only text, breaking the --json contract.
     json_mode, _ = _ctx_state(ctx)
     if not file.is_file():
         _fail(json_mode, f"media file not found: {file}")
@@ -207,16 +228,19 @@ def set_output(ctx: click.Context, file: Path, fmt: Optional[str]) -> None:
 def set_option(ctx: click.Context, key: str, value: str) -> None:
     """Set a transcode option (vcodec, acodec, vbitrate, abitrate, scale, width,
     height, fps, channels, samplerate). Numeric where appropriate."""
+    json_mode, _ = _ctx_state(ctx)
     if key not in TRANSCODE_OPTION_KEYS:
-        json_mode, _ = _ctx_state(ctx)
-        _emit({"error": "ValueError",
-               "detail": f"unknown transcode option '{key}'. Known options: "
-                         + ", ".join(TRANSCODE_OPTION_KEYS)}, json_mode)
-        sys.exit(1)
+        _fail(json_mode, f"unknown transcode option '{key}'. Known options: "
+                         + ", ".join(TRANSCODE_OPTION_KEYS))
+    coerced: Any = value
+    if key in NUMERIC_OPTION_KEYS:
+        num = _coerce_number(key, value)
+        if num is None:
+            _fail(json_mode, f"option '{key}' expects a finite number, got '{value}'")
+        coerced = num
 
     def _mut(j: Dict[str, Any]) -> None:
-        t = j.setdefault("transcode", {})
-        t[key] = float(value) if key in NUMERIC_OPTION_KEYS else value
+        j.setdefault("transcode", {})[key] = coerced
 
     _apply(ctx, f"set-option {key}={value}", _mut)
 
@@ -285,7 +309,7 @@ def snapshot(ctx: click.Context) -> None:
 
 
 @cli.command()
-@click.argument("file", type=click.Path(dir_okay=False, path_type=Path))
+@click.argument("file", type=click.Path(path_type=Path))
 @click.pass_context
 def info(ctx: click.Context, file: Path) -> None:
     """Probe a media file via VLC (best-effort metadata parse)."""
@@ -425,9 +449,15 @@ def _repl(project: Optional[Path] = None) -> None:
                     skin.error(f"unknown transcode option '{key}'. Known: "
                                + ", ".join(TRANSCODE_OPTION_KEYS))
                     continue
+                coerced: Any = val
+                if key in NUMERIC_OPTION_KEYS:
+                    num = _coerce_number(key, val)
+                    if num is None:
+                        skin.error(f"option '{key}' expects a finite number, got '{val}'")
+                        continue
+                    coerced = num
                 session.mutate(f"set-option {key}={val}",
-                               lambda j: j.setdefault("transcode", {}).__setitem__(
-                                   key, float(val) if key in NUMERIC_OPTION_KEYS else val))
+                               lambda j: j.setdefault("transcode", {}).__setitem__(key, coerced))
                 _persist(); skin.success(f"{key} = {val}")
             elif cmd == "set-stream":
                 proto, dst, port = (args + ["rtp", "127.0.0.1", "1234"])[:3]

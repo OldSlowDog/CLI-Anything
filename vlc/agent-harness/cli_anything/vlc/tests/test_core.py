@@ -691,3 +691,115 @@ def test_cli_project_show_without_project_is_structured():
     payload = json.loads(r.output)
     assert payload.get("error")
     assert "project" in payload.get("detail", "").lower()
+
+
+# ── fifth-round review fixes ────────────────────────────────────────────
+
+def test_cli_project_new_unwritable_target_is_structured(tmp_path):
+    # A target that cannot be written must surface as a structured --json error instead
+    # of a traceback with an empty stdout. (Windows raises PermissionError, POSIX
+    # IsADirectoryError, so assert on the contract rather than the exact exception.)
+    runner = CliRunner()
+    r = runner.invoke(vlc_cli.cli, ["--json", "project", "new", "-o", str(tmp_path)])
+    assert r.exit_code == 1
+    payload = json.loads(r.output)
+    assert payload.get("error") in {"IsADirectoryError", "PermissionError", "OSError"}
+    # Windows raises PermissionError, POSIX IsADirectoryError. Assert on the contract,
+    # not the exact exception or the path text (Windows escapes backslashes via %r).
+    detail = payload.get("detail", "").lower()
+    assert "denied" in detail or "directory" in detail
+
+
+def test_cli_add_input_directory_is_structured(tmp_path):
+    # A directory passed as FILE must reach the callback's is_file() check rather than
+    # being rejected by click.Path(dir_okay=False) with exit 2 and human-only text.
+    job = tmp_path / "job.json"
+    proj.save_job(proj.new_job(), job)
+    runner = CliRunner()
+    r = runner.invoke(vlc_cli.cli, ["--json", "--project", str(job),
+                                    "add-input", str(tmp_path)])
+    assert r.exit_code == 1
+    payload = json.loads(r.output)
+    assert payload.get("error")
+    assert "directory" in payload.get("detail", "").lower()
+
+
+def test_cli_info_directory_is_structured(tmp_path):
+    runner = CliRunner()
+    r = runner.invoke(vlc_cli.cli, ["--json", "info", str(tmp_path)])
+    assert r.exit_code == 1
+    assert json.loads(r.output).get("error")
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "1e309"])
+def test_set_option_rejects_non_finite_numbers(tmp_path, bad):
+    # float() accepts nan/inf/1e309; those serialise as the NaN/Infinity tokens, which
+    # are not valid JSON, so both the --json response and the saved project would be
+    # unparseable for strict agent callers.
+    # (`-inf` is deliberately absent: a leading dash is intercepted by Click's option
+    # parser before the callback — the CLI-syntax class left out of the data contract.)
+    job = tmp_path / "job.json"
+    proj.save_job(proj.new_job(), job)
+    before = job.read_text(encoding="utf-8")
+    runner = CliRunner()
+    r = runner.invoke(vlc_cli.cli, ["--json", "--project", str(job),
+                                    "set-option", "vbitrate", bad])
+    assert r.exit_code == 1
+    payload = json.loads(r.output)
+    assert payload.get("error")
+    assert "finite" in payload.get("detail", "").lower()
+    assert job.read_text(encoding="utf-8") == before  # nothing persisted
+
+
+def test_set_option_rejects_non_numeric_value(tmp_path):
+    job = tmp_path / "job.json"
+    proj.save_job(proj.new_job(), job)
+    runner = CliRunner()
+    r = runner.invoke(vlc_cli.cli, ["--json", "--project", str(job),
+                                    "set-option", "vbitrate", "fast"])
+    assert r.exit_code == 1
+    assert json.loads(r.output).get("error")
+
+
+def test_load_job_rejects_non_finite_transcode(tmp_path):
+    p = tmp_path / "nan.json"
+    p.write_text(json.dumps({"software": "vlc", "inputs": ["a.mp4"],
+                             "transcode": {"vbitrate": float("nan")}}), encoding="utf-8")
+    with pytest.raises(ValueError, match="finite"):
+        proj.load_job(p)
+
+
+def test_load_job_rejects_boolean_transcode_value(tmp_path):
+    p = tmp_path / "bool.json"
+    p.write_text(json.dumps({"software": "vlc", "inputs": ["a.mp4"],
+                             "transcode": {"vbitrate": True}}), encoding="utf-8")
+    with pytest.raises(ValueError, match="vbitrate"):
+        proj.load_job(p)
+
+
+def test_load_job_rejects_scalar_extra(tmp_path):
+    # A string `extra` would be extend()ed character by character into the sout chain.
+    p = tmp_path / "extra.json"
+    p.write_text(json.dumps({"software": "vlc", "inputs": ["a.mp4"],
+                             "transcode": {"extra": "soverlay"}}), encoding="utf-8")
+    with pytest.raises(ValueError, match="extra"):
+        proj.load_job(p)
+
+
+def test_load_job_rejects_non_string_extra_items(tmp_path):
+    p = tmp_path / "extra.json"
+    p.write_text(json.dumps({"software": "vlc", "inputs": ["a.mp4"],
+                             "transcode": {"extra": ["soverlay", 3]}}), encoding="utf-8")
+    with pytest.raises(ValueError, match="extra"):
+        proj.load_job(p)
+
+
+def test_build_sout_treats_scalar_extra_as_single_option():
+    # Defence in depth for jobs built in memory rather than loaded from disk.
+    j = proj.new_job()
+    j["inputs"].append("in.mp4")
+    j["output"] = {"path": "out.mp4", "format": "mp4"}
+    j["transcode"]["extra"] = "soverlay"
+    s = transcode.build_transcode_sout(j)
+    assert "soverlay" in s
+    assert "s,o,v,e,r,l,a,y" not in s

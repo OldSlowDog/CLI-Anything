@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -83,8 +84,19 @@ def _schema_problems(job: Any) -> List[str]:
     if isinstance(trans, dict):
         for key in _NUMERIC_OPTIONS:
             value = trans.get(key)
-            if value is not None and not isinstance(value, (int, float)):
+            if value is None:
+                continue
+            # bool is an int subclass, so `true` would otherwise pass as 1.
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
                 problems.append(f"transcode.{key} must be a number")
+            elif not math.isfinite(value):
+                problems.append(f"transcode.{key} must be a finite number")
+        extra = trans.get("extra")
+        if extra is not None:
+            if not isinstance(extra, list):
+                problems.append("transcode.extra must be a list")
+            elif not all(isinstance(item, str) for item in extra):
+                problems.append("transcode.extra must contain only strings")
     return problems
 
 

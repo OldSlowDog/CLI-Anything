@@ -52,7 +52,7 @@ E2E paths run without ffmpeg.
 
 ```
 platform win32 -- Python 3.14.3, pytest-9.1.1
-collected 43 items
+collected 55 items
 
 test_new_job_defaults PASSED
 test_save_and_load_roundtrip PASSED
@@ -97,11 +97,23 @@ test_cli_info_missing_file_is_structured PASSED
 test_cli_add_input_missing_file_is_structured PASSED
 test_cli_set_output_directory_is_structured PASSED
 test_cli_project_show_without_project_is_structured PASSED
+test_cli_project_new_unwritable_target_is_structured PASSED
+test_cli_add_input_directory_is_structured PASSED
+test_cli_info_directory_is_structured PASSED
+test_set_option_rejects_non_finite_numbers[nan] PASSED
+test_set_option_rejects_non_finite_numbers[inf] PASSED
+test_set_option_rejects_non_finite_numbers[1e309] PASSED
+test_set_option_rejects_non_numeric_value PASSED
+test_load_job_rejects_non_finite_transcode PASSED
+test_load_job_rejects_boolean_transcode_value PASSED
+test_load_job_rejects_scalar_extra PASSED
+test_load_job_rejects_non_string_extra_items PASSED
+test_build_sout_treats_scalar_extra_as_single_option PASSED
 
-============================= 42 passed, 1 skipped in 0.84s =============================
+============================= 54 passed, 1 skipped in 0.94s =============================
 ```
 
-**Summary:** 42 passed, 1 skipped (`test_find_vlc_rejects_non_executable_file` — the
+**Summary:** 54 passed, 1 skipped (`test_find_vlc_rejects_non_executable_file` — the
 exec-bit check is POSIX-only). No external dependency (VLC / ffmpeg) required.
 
 #### Regression-proofing of the review fixes
@@ -116,7 +128,13 @@ test that would pass either way:
 | 2nd (`cb6fe9e`) | 7 | output aliases input, stale destination rejected, persistent stream, guarded malformed projects, REPL `shlex`, `VLC_BINARY` validation, `.gitignore` scoping |
 | 3rd (`7d5c4e1`) | 4 | `new` detaches an opened project, schema-invalid projects rejected at load *and* inside the guard, temp-file cleanup on subprocess failure, per-run snapshot prefix |
 | 4th (`77f42fc`) | 4 | `info` playback bounded independently of media length, explicit-null containers normalised at load, REPL binds a not-yet-existing `--project`, unknown `set-option` keys rejected |
+| 5th (`f58b8f8`) | 4 | `project new` write failures guarded, directory inputs routed through the callback, non-finite numeric options rejected, `transcode.extra` validated as `list[str]` |
 | proactive | — | every *data-level* `--json` failure emits structured JSON: missing media file (`info` / `add-input`), output path that is a directory (`set-output`), missing `--project` (`project show`) |
+
+> The `nan` / `inf` finding is the important one: `float()` accepts them, and the
+> resulting `NaN` / `Infinity` tokens are **not valid JSON**, so strict agent parsers
+> could consume neither the `--json` response nor the saved project. Numeric options are
+> now required to be finite, both when set and when a project is loaded.
 
 > The proactive row was not a review finding: the remaining `--json` failures are pure
 > CLI syntax errors (missing argument, unknown option/command), which still exit 2 with
