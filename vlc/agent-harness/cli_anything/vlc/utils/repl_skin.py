@@ -141,11 +141,13 @@ class ReplSkin:
         self.skill_path = skill_path
         self.accent = _ACCENT_COLORS.get(self.software, _DEFAULT_ACCENT)
 
-        # History file
+        # History file. The directory is created lazily by create_prompt_session()
+        # rather than here: merely constructing the skin must not touch (or fail on)
+        # HOME, which used to raise before _repl()'s error handling was in place.
         if history_file is None:
-            hist_dir = Path.home() / f".cli-anything-{self.software}"
-            hist_dir.mkdir(parents=True, exist_ok=True)
-            self.history_file = str(hist_dir / "history")
+            self.history_file = str(
+                Path.home() / f".cli-anything-{self.software}" / "history"
+            )
         else:
             self.history_file = history_file
 
@@ -421,13 +423,22 @@ class ReplSkin:
         """Create a prompt_toolkit PromptSession with skin styling."""
         try:
             from prompt_toolkit import PromptSession
-            from prompt_toolkit.history import FileHistory
+            from prompt_toolkit.history import FileHistory, InMemoryHistory
             from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 
             style = self.get_prompt_style()
 
+            # Create the history directory now that it is actually needed, and degrade
+            # to in-memory history if HOME is not writable — the REPL must still start.
+            hist_path = Path(self.history_file)
+            try:
+                hist_path.parent.mkdir(parents=True, exist_ok=True)
+                history = FileHistory(str(hist_path))
+            except OSError:
+                history = InMemoryHistory()
+
             session = PromptSession(
-                history=FileHistory(self.history_file),
+                history=history,
                 auto_suggest=AutoSuggestFromHistory(),
                 style=style,
                 enable_history_search=True,

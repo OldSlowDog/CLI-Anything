@@ -9,6 +9,8 @@ from __future__ import annotations
 import copy
 import json
 import math
+import os
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -164,10 +166,24 @@ def load_job(path) -> Dict[str, Any]:
 
 
 def save_job(job: Dict[str, Any], path) -> Dict[str, Any]:
-    """Persist a job spec to a JSON file; return metadata about the written file."""
+    """Persist a job spec to a JSON file; return metadata about the written file.
+
+    Written to a temporary sibling and renamed into place, so an interrupted write
+    can never leave a truncated project behind for the next ``load_job`` to choke on
+    — the same temp-and-replace discipline ``run_transcode`` uses for its output.
+    """
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(job, indent=2, ensure_ascii=False), encoding="utf-8")
+    payload = json.dumps(job, indent=2, ensure_ascii=False)
+    fd, tmp_name = tempfile.mkstemp(prefix=".vlc-job-", suffix=".tmp", dir=str(p.parent))
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+        os.replace(tmp, p)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
     return {"path": str(p), "size_bytes": p.stat().st_size}
 
 

@@ -52,7 +52,7 @@ E2E paths run without ffmpeg.
 
 ```
 platform win32 -- Python 3.14.3, pytest-9.1.1
-collected 83 items
+collected 89 items
 
 test_new_job_defaults PASSED
 test_save_and_load_roundtrip PASSED
@@ -137,11 +137,17 @@ test_set_snapshot_rejects_zero_ratio PASSED
 test_build_snapshot_args_rejects_zero_ratio PASSED
 test_build_snapshot_args_rejects_non_integer_ratio PASSED
 test_skill_copies_stay_in_sync PASSED
+test_repl_add_input_rejects_missing_file PASSED
+test_repl_add_input_accepts_existing_file PASSED
+test_repl_set_output_rejects_directory PASSED
+test_save_job_is_atomic_on_success PASSED
+test_save_job_leaves_no_temp_and_keeps_old_file_on_failure PASSED
+test_repl_skin_construction_does_not_write_home PASSED
 
-============================= 82 passed, 1 skipped in 1.52s =============================
+============================= 88 passed, 1 skipped in 0.98s =============================
 ```
 
-**Summary:** 82 passed, 1 skipped (`test_find_vlc_rejects_non_executable_file` — the
+**Summary:** 88 passed, 1 skipped (`test_find_vlc_rejects_non_executable_file` — the
 exec-bit check is POSIX-only). No external dependency (VLC / ffmpeg) required.
 
 #### Regression-proofing of the review fixes
@@ -160,6 +166,7 @@ test that would pass either way:
 | 6th (`9013821`) | 6 | `VLC_BINARY` probed before `doctor` reports ready, null output format/mux defaulted, missing snapshot `time` defaulted, non-finite snapshot times rejected, partial snapshots cleaned up on failure, README command table corrected |
 | class sweep | — | Same bug classes as earlier rounds, audited across **every** path rather than the reported one: `stream.dst`/`stream.port` null handling and port coercion, `stream`/`snapshot` sub-field schema validation, and the `doctor` response shape documented in `examples/agent-workflows.md` |
 | 7th (`eea996a`) | 4 | VLC probe fixtures made executable on POSIX, `--version` probe required to exit zero, zero snapshot ratios rejected instead of silently substituted, root `skills/` copy kept in sync with the packaged one |
+| class sweep (2) | — | Same audit applied to the paths the first sweep did not reach: the **REPL** (which validated nothing) and **on-disk atomicity**. `add-input` / `set-output` now validate in the REPL exactly as the Click commands do; `save_job` writes to a temp sibling and renames; `ReplSkin` no longer creates `~/.cli-anything-*` merely by being constructed |
 
 > The 6th round went *up* (4 → 6) because two findings were second instances of classes
 > fixed in earlier rounds: the non-finite-number hole had only been closed on the

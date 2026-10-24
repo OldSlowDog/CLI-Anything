@@ -25,6 +25,7 @@ from cli_anything.vlc.core import session as sess_mod
 from cli_anything.vlc.core import transcode
 from cli_anything.vlc.core import media
 from cli_anything.vlc.utils import vlc_backend
+from cli_anything.vlc.utils.repl_skin import ReplSkin
 
 
 # ── core.project ───────────────────────────────────────────────────────
@@ -698,17 +699,17 @@ def test_cli_project_show_without_project_is_structured():
 
 def test_cli_project_new_unwritable_target_is_structured(tmp_path):
     # A target that cannot be written must surface as a structured --json error instead
-    # of a traceback with an empty stdout. (Windows raises PermissionError, POSIX
-    # IsADirectoryError, so assert on the contract rather than the exact exception.)
+    # of a traceback with an empty stdout. Assert on the contract only: the exception
+    # type differs by platform (Windows PermissionError, POSIX IsADirectoryError) and
+    # the message is *localised* ([WinError 5] 拒绝访问。), so no English substring.
     runner = CliRunner()
     r = runner.invoke(vlc_cli.cli, ["--json", "project", "new", "-o", str(tmp_path)])
     assert r.exit_code == 1
     payload = json.loads(r.output)
     assert payload.get("error") in {"IsADirectoryError", "PermissionError", "OSError"}
-    # Windows raises PermissionError, POSIX IsADirectoryError. Assert on the contract,
-    # not the exact exception or the path text (Windows escapes backslashes via %r).
-    detail = payload.get("detail", "").lower()
-    assert "denied" in detail or "directory" in detail
+    assert payload.get("detail")
+    # and the failed write must not leave a stray temp sibling behind
+    assert list(tmp_path.parent.glob(".vlc-job-*")) == []
 
 
 def test_cli_add_input_directory_is_structured(tmp_path):
@@ -1090,6 +1091,56 @@ def test_build_snapshot_args_rejects_non_integer_ratio():
         transcode.build_snapshot_args(j)
 
 
+class _ScriptedSkin:
+    """Minimal ReplSkin stand-in that feeds a fixed command script and records errors."""
+
+    def __init__(self, script, errors):
+        self._script = list(script)
+        self._errors = errors
+
+    def __call__(self, *a, **k):
+        return self
+
+    def print_banner(self):
+        pass
+
+    def create_prompt_session(self):
+        return object()
+
+    def get_input(self, pt, project_name=None, modified=False):
+        return self._script.pop(0) if self._script else "quit"
+
+    def success(self, *a, **k):
+        pass
+
+    def error(self, msg):
+        self._errors.append(msg)
+
+    def info(self, *a, **k):
+        pass
+
+    def status_block(self, *a, **k):
+        pass
+
+    def help(self, *a, **k):
+        pass
+
+    def print_goodbye(self):
+        pass
+
+
+def _run_repl(script, monkeypatch, project=None):
+    """Drive _repl() with a scripted skin; return the error messages it emitted."""
+    errors: list = []
+
+    def _factory(*a, **k):
+        return _ScriptedSkin(script, errors)
+
+    monkeypatch.setattr(vlc_cli, "ReplSkin", _factory)
+    vlc_cli._repl(project)
+    return errors
+
+
 def test_skill_copies_stay_in_sync():
     # registry.json points agents at the root copy, so the two must not diverge — and
     # neither may place root options after the subcommand they belong to.
@@ -1108,3 +1159,63 @@ def test_skill_copies_stay_in_sync():
             continue
         assert line.index("--project") < line.index("project show"), line
         assert line.index("--json") < line.index("project show"), line
+
+
+# ── class sweep, second pass: REPL path + on-disk atomicity ─────────────
+
+def test_repl_add_input_rejects_missing_file(monkeypatch, tmp_path):
+    # The Click path validates existence; the REPL used to accept a typo'd path and
+    # only fail later, inside VLC.
+    errors = _run_repl([f"add-input {tmp_path / 'nope.mp4'}", "quit"], monkeypatch)
+    assert errors and "not found" in errors[0].lower()
+
+
+def test_repl_add_input_accepts_existing_file(monkeypatch, tmp_path):
+    media = tmp_path / "in.mp4"
+    media.write_text("x", encoding="utf-8")
+    job = tmp_path / "job.json"
+    proj.save_job(proj.new_job(), job)
+    errors = _run_repl([f"add-input {media}", "quit"], monkeypatch, project=job)
+    assert not errors
+    assert json.loads(job.read_text(encoding="utf-8"))["inputs"] == [str(media)]
+
+
+def test_repl_set_output_rejects_directory(monkeypatch, tmp_path):
+    errors = _run_repl([f"set-output {tmp_path}", "quit"], monkeypatch)
+    assert errors and "directory" in errors[0].lower()
+
+
+def test_save_job_is_atomic_on_success(tmp_path):
+    target = tmp_path / "job.json"
+    meta = proj.save_job(proj.new_job(), target)
+    assert target.is_file()
+    assert meta["size_bytes"] == target.stat().st_size
+    assert list(tmp_path.glob(".vlc-job-*")) == []
+
+
+def test_save_job_leaves_no_temp_and_keeps_old_file_on_failure(monkeypatch, tmp_path):
+    # An interrupted write must not leave a truncated project behind for the next
+    # load_job to choke on, nor a stray temp sibling.
+    target = tmp_path / "job.json"
+    proj.save_job(proj.new_job(), target)
+    before = target.read_text(encoding="utf-8")
+
+    def _boom(src, dst):
+        raise OSError("simulated interruption")
+
+    monkeypatch.setattr(proj.os, "replace", _boom)
+    with pytest.raises(OSError):
+        proj.save_job({**proj.new_job(), "inputs": ["x"]}, target)
+    assert target.read_text(encoding="utf-8") == before
+    assert list(tmp_path.glob(".vlc-job-*")) == []
+
+
+def test_repl_skin_construction_does_not_write_home(monkeypatch, tmp_path):
+    # Constructing the skin must not touch HOME: a read-only HOME used to raise
+    # before _repl()'s error handling was in place, killing the REPL on startup.
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+    skin = ReplSkin("vlc", version="1.0.0")
+    assert not (fake_home / ".cli-anything-vlc").exists()
+    assert skin.history_file.replace("\\", "/").endswith(".cli-anything-vlc/history")

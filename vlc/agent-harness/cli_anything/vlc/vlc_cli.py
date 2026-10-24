@@ -441,16 +441,26 @@ def _repl(project: Optional[Path] = None) -> None:
                 meta = proj.save_job(session.job, project_path[0])
                 skin.success(f"saved {meta['path']} ({meta['size_bytes']} bytes)")
             elif cmd == "add-input":
-                session.mutate(f"add-input {Path(args[0]).name}",
-                               lambda j: j.setdefault("inputs", []).append(str(Path(args[0]))))
+                candidate = Path(args[0])
+                # The Click path validates existence; the REPL must not be the one
+                # place a typo'd path is accepted and only fails later inside VLC.
+                if not candidate.is_file():
+                    skin.error(f"input file not found: {candidate}")
+                    continue
+                session.mutate(f"add-input {candidate.name}",
+                               lambda j: j.setdefault("inputs", []).append(str(candidate)))
                 _persist(); skin.success("input added")
             elif cmd == "set-output":
                 fmt = None
                 if "--format" in args:
                     i = args.index("--format"); fmt = args[i + 1]
-                session.mutate(f"set-output {args[0]}",
+                target = Path(args[0])
+                if target.is_dir():
+                    skin.error(f"output path is a directory: {target}")
+                    continue
+                session.mutate(f"set-output {target}",
                                lambda j: j.__setitem__("output",
-                                    {"path": str(Path(args[0])),
+                                    {"path": str(target),
                                      "format": fmt or j.get("output", {}).get("format", "mp4")}))
                 _persist(); skin.success("output set")
             elif cmd == "set-option":
