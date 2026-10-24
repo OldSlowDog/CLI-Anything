@@ -29,6 +29,9 @@
   `--project`, shell-like tokenising of quoted Windows paths
 - `TestOptionValidation` — unknown `set-option` keys rejected on both the Click and
   REPL paths without persisting anything
+- `TestStructuredErrors` — every data-level failure in `--json` mode (missing media
+  file, output path is a directory, missing `--project`) returns a JSON document and
+  exit 1 rather than Click's human-only usage error
 
 ### E2E Test Plan (`test_full_e2e.py`)
 
@@ -49,7 +52,7 @@ E2E paths run without ffmpeg.
 
 ```
 platform win32 -- Python 3.14.3, pytest-9.1.1
-collected 39 items
+collected 43 items
 
 test_new_job_defaults PASSED
 test_save_and_load_roundtrip PASSED
@@ -90,11 +93,15 @@ test_run_info_bounds_playback PASSED
 test_repl_binds_missing_project_path PASSED
 test_set_option_rejects_unknown_key PASSED
 test_repl_set_option_rejects_unknown_key PASSED
+test_cli_info_missing_file_is_structured PASSED
+test_cli_add_input_missing_file_is_structured PASSED
+test_cli_set_output_directory_is_structured PASSED
+test_cli_project_show_without_project_is_structured PASSED
 
-============================= 38 passed, 1 skipped in 0.83s =============================
+============================= 42 passed, 1 skipped in 0.84s =============================
 ```
 
-**Summary:** 38 passed, 1 skipped (`test_find_vlc_rejects_non_executable_file` — the
+**Summary:** 42 passed, 1 skipped (`test_find_vlc_rejects_non_executable_file` — the
 exec-bit check is POSIX-only). No external dependency (VLC / ffmpeg) required.
 
 #### Regression-proofing of the review fixes
@@ -109,6 +116,13 @@ test that would pass either way:
 | 2nd (`cb6fe9e`) | 7 | output aliases input, stale destination rejected, persistent stream, guarded malformed projects, REPL `shlex`, `VLC_BINARY` validation, `.gitignore` scoping |
 | 3rd (`7d5c4e1`) | 4 | `new` detaches an opened project, schema-invalid projects rejected at load *and* inside the guard, temp-file cleanup on subprocess failure, per-run snapshot prefix |
 | 4th (`77f42fc`) | 4 | `info` playback bounded independently of media length, explicit-null containers normalised at load, REPL binds a not-yet-existing `--project`, unknown `set-option` keys rejected |
+| proactive | — | every *data-level* `--json` failure emits structured JSON: missing media file (`info` / `add-input`), output path that is a directory (`set-output`), missing `--project` (`project show`) |
+
+> The proactive row was not a review finding: the remaining `--json` failures are pure
+> CLI syntax errors (missing argument, unknown option/command), which still exit 2 with
+> Click's human-only text. Those are deliberately left alone — they are command-line
+> misuse rather than the agent-facing data contract, and changing them means overriding
+> Click's own usage-error handling.
 
 ### E2E — `pytest cli_anything/vlc/tests/test_full_e2e.py -v` (real VLC 3.0.21)
 

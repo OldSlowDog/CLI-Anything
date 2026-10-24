@@ -40,6 +40,12 @@ def _emit(data: Dict[str, Any], json_mode: bool) -> None:
             click.echo(f"{key}: {value}")
 
 
+def _fail(json_mode: bool, detail: str, exc: type = ValueError) -> None:
+    """Emit a structured error and exit non-zero — the ``--json`` error contract."""
+    _emit({"error": exc.__name__, "detail": detail}, json_mode)
+    sys.exit(1)
+
+
 def _ctx_state(ctx: click.Context):
     return ctx.obj.get("json", False), ctx.obj.get("project")
 
@@ -143,7 +149,7 @@ def project_show(ctx: click.Context) -> None:
     """Print the current job spec (from --project)."""
     json_mode, project = _ctx_state(ctx)
     if not project or not Path(project).is_file():
-        raise click.ClickException("no --project file given or it does not exist")
+        _fail(json_mode, "no --project file given or it does not exist", click.ClickException)
     try:
         loaded = proj.load_job(project)
     except Exception as e:  # noqa: BLE001 — malformed project -> structured error
@@ -167,20 +173,28 @@ NUMERIC_OPTION_KEYS = frozenset(
 
 
 @cli.command("add-input")
-@click.argument("file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("file", type=click.Path(dir_okay=False, path_type=Path))
 @click.pass_context
 def add_input(ctx: click.Context, file: Path) -> None:
     """Append an input media file to the job."""
+    # Validated here rather than by click.Path(exists=True): Click's own check exits 2
+    # with human-only text, which breaks the --json structured-error contract.
+    json_mode, _ = _ctx_state(ctx)
+    if not file.is_file():
+        _fail(json_mode, f"media file not found: {file}")
     _apply(ctx, f"add-input {file.name}",
            lambda j: j.setdefault("inputs", []).append(str(file)))
 
 
 @cli.command("set-output")
-@click.argument("file", type=click.Path(dir_okay=False, path_type=Path))
+@click.argument("file", type=click.Path(path_type=Path))
 @click.option("--format", "fmt", default=None, help="Output container (mp4/mkv/ts/webm/...)")
 @click.pass_context
 def set_output(ctx: click.Context, file: Path, fmt: Optional[str]) -> None:
     """Set the output file (and optional container format)."""
+    json_mode, _ = _ctx_state(ctx)
+    if file.is_dir():  # see add-input: keep the failure inside the structured contract
+        _fail(json_mode, f"output path is a directory: {file}")
     _apply(ctx, f"set-output {file.name}",
            lambda j: (j.__setitem__("output", {"path": str(file),
                                                 "format": fmt or j.get("output", {}).get("format", "mp4")})))
@@ -271,11 +285,13 @@ def snapshot(ctx: click.Context) -> None:
 
 
 @cli.command()
-@click.argument("file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("file", type=click.Path(dir_okay=False, path_type=Path))
 @click.pass_context
 def info(ctx: click.Context, file: Path) -> None:
     """Probe a media file via VLC (best-effort metadata parse)."""
     json_mode, _ = _ctx_state(ctx)
+    if not file.is_file():  # see add-input: structured error, not a Click usage error
+        _fail(json_mode, f"media file not found: {file}")
     _guard(lambda: run_info(file), json_mode)
 
 

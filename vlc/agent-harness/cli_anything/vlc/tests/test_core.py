@@ -648,3 +648,46 @@ def test_repl_set_option_rejects_unknown_key(tmp_path, monkeypatch):
     monkeypatch.setattr(vlc_cli, "ReplSkin", _FakeSkin)
     vlc_cli._repl(None)
     assert errors and "vcdoec" in errors[0]
+
+
+# ── structured-error contract sweep ─────────────────────────────────────
+
+def test_cli_info_missing_file_is_structured(tmp_path):
+    # A missing media file must surface as a structured --json error, not a Click
+    # usage error (exit 2, human-only text, empty stdout).
+    runner = CliRunner()
+    r = runner.invoke(vlc_cli.cli, ["--json", "info", str(tmp_path / "nope.mp4")])
+    assert r.exit_code == 1
+    payload = json.loads(r.output)
+    assert payload.get("error")
+    assert "nope.mp4" in payload.get("detail", "")
+
+
+def test_cli_add_input_missing_file_is_structured(tmp_path):
+    job = tmp_path / "job.json"
+    proj.save_job(proj.new_job(), job)
+    runner = CliRunner()
+    r = runner.invoke(vlc_cli.cli, ["--json", "--project", str(job),
+                                    "add-input", str(tmp_path / "nope.mp4")])
+    assert r.exit_code == 1
+    assert json.loads(r.output).get("error")
+
+
+def test_cli_set_output_directory_is_structured(tmp_path):
+    job = tmp_path / "job.json"
+    proj.save_job(proj.new_job(), job)
+    runner = CliRunner()
+    r = runner.invoke(vlc_cli.cli, ["--json", "--project", str(job), "set-output", str(tmp_path)])
+    assert r.exit_code == 1
+    payload = json.loads(r.output)
+    assert payload.get("error")
+    assert "directory" in payload.get("detail", "").lower()
+
+
+def test_cli_project_show_without_project_is_structured():
+    runner = CliRunner()
+    r = runner.invoke(vlc_cli.cli, ["--json", "project", "show"])
+    assert r.exit_code == 1
+    payload = json.loads(r.output)
+    assert payload.get("error")
+    assert "project" in payload.get("detail", "").lower()
