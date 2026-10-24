@@ -97,6 +97,37 @@ def _schema_problems(job: Any) -> List[str]:
                 problems.append("transcode.extra must be a list")
             elif not all(isinstance(item, str) for item in extra):
                 problems.append("transcode.extra must contain only strings")
+    stream = job.get("stream")
+    if isinstance(stream, dict):
+        for key in ("protocol", "dst", "mux"):
+            value = stream.get(key)
+            if value is not None and not isinstance(value, str):
+                problems.append(f"stream.{key} must be a string")
+        port = stream.get("port")
+        if port is not None:
+            if isinstance(port, bool) or not isinstance(port, (int, float)):
+                problems.append("stream.port must be a number")
+            elif not math.isfinite(port) or not 1 <= port <= 65535:
+                problems.append("stream.port must be between 1 and 65535")
+    snap = job.get("snapshot")
+    if isinstance(snap, dict):
+        path = snap.get("path")
+        if path is not None and not isinstance(path, str):
+            problems.append("snapshot.path must be a string")
+        ratio = snap.get("ratio")
+        if ratio is not None:
+            if isinstance(ratio, bool) or not isinstance(ratio, (int, float)):
+                problems.append("snapshot.ratio must be a number")
+            elif not math.isfinite(ratio) or ratio < 1:
+                problems.append("snapshot.ratio must be a number >= 1")
+        seek = snap.get("time")
+        if seek is not None:
+            if isinstance(seek, bool) or not isinstance(seek, (int, float)):
+                problems.append("snapshot.time must be a number")
+            elif not math.isfinite(seek):
+                problems.append("snapshot.time must be a finite number")
+            elif seek < 0:
+                problems.append("snapshot.time must not be negative")
     return problems
 
 

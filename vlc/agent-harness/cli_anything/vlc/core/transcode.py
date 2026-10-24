@@ -170,12 +170,35 @@ def build_transcode_sout(job: Dict[str, Any]) -> str:
     return f"#{_transcode_block(job)}:{std}"
 
 
+def _coerce_port(value: Any) -> int:
+    """Coerce a stream port to a valid port number, defaulting when unset.
+
+    ``int(None)`` raised TypeError and ``int("abc")`` / ``int(1e309)`` raised
+    ValueError / OverflowError — all of which escaped as tracebacks instead of the
+    structured error the CLI promises. Out-of-range values are rejected for the same
+    reason: VLC cannot bind them.
+    """
+    if value is None or value == "":
+        return 1234  # documented default
+    try:
+        port = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(
+            f"stream.port must be an integer between 1 and 65535, got {value!r}"
+        )
+    if not 1 <= port <= 65535:
+        raise ValueError(f"stream.port must be between 1 and 65535, got {port}")
+    return port
+
+
 def build_stream_sout(job: Dict[str, Any]) -> str:
     """Build a network-stream ``--sout`` chain from ``job['stream']``."""
     s = job.get("stream") or {}
     proto = (s.get("protocol") or "rtp").lower()
-    dst = s.get("dst", "127.0.0.1")
-    port = int(s.get("port", 1234))
+    # `get(k, default)` returns the stored null, which used to reach the chain as
+    # `dst=None` and crash on `int(None)`; a null means "unset", not "None".
+    dst = s.get("dst") or "127.0.0.1"
+    port = _coerce_port(s.get("port"))
     mux = resolve_mux(s.get("mux") or "ts")  # null mux -> "none" via get()'s default
 
     if proto == "rtp":

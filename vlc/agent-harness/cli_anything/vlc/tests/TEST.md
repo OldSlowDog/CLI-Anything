@@ -52,7 +52,7 @@ E2E paths run without ffmpeg.
 
 ```
 platform win32 -- Python 3.14.3, pytest-9.1.1
-collected 67 items
+collected 78 items
 
 test_new_job_defaults PASSED
 test_save_and_load_roundtrip PASSED
@@ -121,11 +121,22 @@ test_set_snapshot_rejects_non_finite_time[inf] PASSED
 test_set_snapshot_rejects_non_finite_time[1e309] PASSED
 test_run_snapshot_cleans_up_when_vlc_fails PASSED
 test_readme_command_table_matches_the_cli PASSED
+test_build_stream_sout_null_dst_and_port_use_defaults PASSED
+test_build_stream_sout_rejects_or_defaults_bad_port[abc] PASSED
+test_build_stream_sout_rejects_or_defaults_bad_port[inf] PASSED
+test_build_stream_sout_rejects_or_defaults_bad_port[0] PASSED
+test_build_stream_sout_rejects_or_defaults_bad_port[70000] PASSED
+test_build_stream_sout_rejects_or_defaults_bad_port[-1] PASSED
+test_build_stream_sout_rejects_or_defaults_bad_port[] PASSED
+test_load_job_rejects_invalid_stream_fields PASSED
+test_load_job_accepts_valid_stream PASSED
+test_load_job_rejects_invalid_snapshot_fields PASSED
+test_documented_doctor_shape_matches_reality PASSED
 
-============================= 66 passed, 1 skipped in 0.92s =============================
+============================= 77 passed, 1 skipped in 1.10s =============================
 ```
 
-**Summary:** 66 passed, 1 skipped (`test_find_vlc_rejects_non_executable_file` — the
+**Summary:** 77 passed, 1 skipped (`test_find_vlc_rejects_non_executable_file` — the
 exec-bit check is POSIX-only). No external dependency (VLC / ffmpeg) required.
 
 #### Regression-proofing of the review fixes
@@ -142,6 +153,7 @@ test that would pass either way:
 | 4th (`77f42fc`) | 4 | `info` playback bounded independently of media length, explicit-null containers normalised at load, REPL binds a not-yet-existing `--project`, unknown `set-option` keys rejected |
 | 5th (`f58b8f8`) | 4 | `project new` write failures guarded, directory inputs routed through the callback, non-finite numeric options rejected, `transcode.extra` validated as `list[str]` |
 | 6th (`9013821`) | 6 | `VLC_BINARY` probed before `doctor` reports ready, null output format/mux defaulted, missing snapshot `time` defaulted, non-finite snapshot times rejected, partial snapshots cleaned up on failure, README command table corrected |
+| class sweep | — | Same bug classes as earlier rounds, audited across **every** path rather than the reported one: `stream.dst`/`stream.port` null handling and port coercion, `stream`/`snapshot` sub-field schema validation, and the `doctor` response shape documented in `examples/agent-workflows.md` |
 
 > The 6th round went *up* (4 → 6) because two findings were second instances of classes
 > fixed in earlier rounds: the non-finite-number hole had only been closed on the

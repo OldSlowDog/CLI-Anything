@@ -51,9 +51,14 @@ Uses VLC's `scene` video filter; emits a PNG still at the requested time.
 
 ```bash
 cli-anything-vlc --json doctor
-# -> {"ready": true, "binary": "...", "version": "3.0.21 ..."}  (exit 0)
-# -> {"ready": false, ...}                                        (exit 1, VLC missing)
+# -> {"checks": [{"check": "vlc binary", "ok": true, "path": "/usr/bin/vlc"}], "ready": true}   (exit 0)
+# -> {"checks": [{"check": "vlc binary", "ok": false, "detail": "VLC not found on PATH..."}],
+#     "ready": false}                                                                          (exit 1)
 ```
+
+`doctor` reports `ready` plus one entry per check in `checks`; each entry carries `ok`
+and either `path` (success) or `detail` (failure). A `VLC_BINARY` that runs but is not
+VLC is reported as a failed check, not as ready.
 
 ## Undo / redo
 

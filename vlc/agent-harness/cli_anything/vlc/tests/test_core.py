@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import struct
 import subprocess
 import wave
@@ -941,3 +942,99 @@ def test_readme_command_table_matches_the_cli():
         assert name in root, f"`{name}` is documented but missing"
     # undo/redo are REPL-only, so the table must say so rather than list them as commands.
     assert "REPL only" in text
+
+
+# ── class-wide sweep (same bug classes as earlier rounds, other paths) ───
+
+def test_build_stream_sout_null_dst_and_port_use_defaults():
+    # `get(k, default)` returns the stored null: dst used to reach the chain as
+    # `dst=None` and `int(None)` raised TypeError.
+    j = proj.new_job()
+    j["inputs"].append("in.mp4")
+    j["stream"] = {"protocol": "udp", "dst": None, "port": None, "mux": "ts"}
+    s = transcode.build_stream_sout(j)
+    assert "dst=None" not in s
+    assert "dst=127.0.0.1" in s
+    assert "port=1234" in s
+
+
+@pytest.mark.parametrize("bad", ["abc", 1e309, 0, 70000, -1, ""])
+def test_build_stream_sout_rejects_or_defaults_bad_port(bad):
+    j = proj.new_job()
+    j["inputs"].append("in.mp4")
+    j["stream"] = {"protocol": "udp", "dst": "127.0.0.1", "port": bad, "mux": "ts"}
+    if bad == "":
+        # an empty string means "unset" and falls back to the documented default
+        assert "port=1234" in transcode.build_stream_sout(j)
+    else:
+        with pytest.raises(ValueError, match="port"):
+            transcode.build_stream_sout(j)
+
+
+def test_load_job_rejects_invalid_stream_fields(tmp_path):
+    cases = [
+        ({"protocol": 1}, "protocol"),
+        ({"dst": 2}, "dst"),
+        ({"mux": 3}, "mux"),
+        ({"port": "abc"}, "port"),
+        ({"port": 0}, "port"),
+        ({"port": 70000}, "port"),
+        ({"port": float("nan")}, "port"),
+    ]
+    for extra, needle in cases:
+        p = tmp_path / "bad.json"
+        p.write_text(json.dumps({"software": "vlc", "inputs": ["a.mp4"],
+                                 "stream": {"protocol": "udp", "dst": "127.0.0.1",
+                                            "port": 6004, "mux": "ts", **extra}}),
+                     encoding="utf-8")
+        with pytest.raises(ValueError, match=needle):
+            proj.load_job(p)
+
+
+def test_load_job_accepts_valid_stream(tmp_path):
+    p = tmp_path / "ok.json"
+    p.write_text(json.dumps({"software": "vlc", "inputs": ["a.mp4"],
+                             "stream": {"protocol": "udp", "dst": "127.0.0.1",
+                                        "port": 6004, "mux": "ts"}}), encoding="utf-8")
+    assert proj.load_job(p)["stream"]["port"] == 6004
+
+
+def test_load_job_rejects_invalid_snapshot_fields(tmp_path):
+    cases = [
+        ({"path": 1}, "snapshot.path"),
+        ({"ratio": 0}, "snapshot.ratio"),
+        ({"ratio": "x"}, "snapshot.ratio"),
+        ({"time": -1}, "snapshot.time"),
+        ({"time": float("nan")}, "snapshot.time"),
+        ({"time": "soon"}, "snapshot.time"),
+    ]
+    for extra, needle in cases:
+        p = tmp_path / "bad.json"
+        p.write_text(json.dumps({"software": "vlc", "inputs": ["a.mp4"],
+                                 "snapshot": {"path": "/tmp/s", "time": 1.0,
+                                              "ratio": 1, **extra}}), encoding="utf-8")
+        with pytest.raises(ValueError, match=re.escape(needle)):
+            proj.load_job(p)
+
+
+def test_documented_doctor_shape_matches_reality():
+    # The workflow doc's doctor example must describe the document the CLI actually
+    # emits; it used to advertise `binary` / `version` keys that do not exist.
+    doc = (Path(__file__).resolve().parents[5] / "vlc" / "agent-harness"
+           / "examples" / "agent-workflows.md")
+    if not doc.is_file():
+        pytest.skip("examples doc not present")
+    text = doc.read_text(encoding="utf-8")
+    match = re.search(r"#\s*->\s*(\{.*\})\s*\(exit 0\)", text)
+    assert match, "the doctor section must show a ready:true JSON example"
+    documented = set(json.loads(match.group(1)))
+
+    runner = CliRunner()
+    result = runner.invoke(vlc_cli.cli, ["--json", "doctor"])
+    assert result.exit_code == 1  # no VLC in this environment -> ready:false
+    actual = set(json.loads(result.output))
+    assert documented == actual, (
+        f"doc documents {sorted(documented)} but doctor emits {sorted(actual)}"
+    )
+    # the failure example must describe the same shape
+    assert '"checks"' in text and '"ready"' in text
